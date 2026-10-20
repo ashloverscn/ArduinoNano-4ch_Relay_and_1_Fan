@@ -62,7 +62,7 @@ String inputBuffer;
 uint8_t dimm_value = 0;
 bool triacState = false;
 
-// Variables to track momentary button states for tactile switches
+// Variables to track button states
 bool buttonLastStates[6] = {HIGH, HIGH, HIGH, HIGH, HIGH, HIGH};
 unsigned long buttonPressStartTime[6] = {0, 0, 0, 0, 0, 0};
 bool buttonHeldTriggered[6] = {false, false, false, false, false, false};
@@ -381,7 +381,7 @@ void handleSerialControl()
   }
 }
 
-// Tactile momentary push-button handler with short-click and long-press support
+// Handler for wall switches (Switches 1-4 as latching toggle switches, Switches 5-6 as momentary push-buttons)
 void handleWallSwitches()
 {
   uint8_t pins[6] = {SwitchPin1, SwitchPin2, SwitchPin3, SwitchPin4, SwitchPin5, SwitchPin6};
@@ -391,7 +391,7 @@ void handleWallSwitches()
   {
     bool currentState = digitalRead(pins[i]);
     
-    // Detect change for button press/release with software debouncing
+    // Detect state change with software debouncing
     if (currentState != buttonLastStates[i])
     {
       delay(15); // Debounce delay
@@ -401,32 +401,37 @@ void handleWallSwitches()
       {
         buttonLastStates[i] = currentState;
         
-        if (currentState == LOW) // Button Pressed Down
+        if (i < 4)
         {
-          buttonIsDown[i] = true;
-          buttonPressStartTime[i] = currentMillis;
-          buttonHeldTriggered[i] = false;
-        }
-        else // Button Released Up
-        {
-          if (buttonIsDown[i])
+          // Switches 1 to 4: Standard wall latching switches (SPDT toggle)
+          // Any state change (flipping the switch) toggles the corresponding relay
+          switch (i)
           {
-            buttonIsDown[i] = false;
-            
-            // If released before long-press threshold, treat as a short click/tap
-            if (!buttonHeldTriggered[i])
+            case 0: relayToggle(1); break;
+            case 1: relayToggle(2); break;
+            case 2: relayToggle(3); break;
+            case 3: relayToggle(4); break;
+          }
+        }
+        else
+        {
+          // Switches 5 and 6 (SwitchPin5, SwitchPin6): Keep original momentary button behavior
+          if (currentState == LOW) // Button Pressed Down
+          {
+            buttonIsDown[i] = true;
+            buttonPressStartTime[i] = currentMillis;
+            buttonHeldTriggered[i] = false;
+          }
+          else // Button Released Up
+          {
+            if (buttonIsDown[i])
             {
-              if (i == 4) dimm_Dn();          // SwitchPin5 short click: Step down -1
-              else if (i == 5) dimm_Up();     // SwitchPin6 short click: Step up +1
-              else
+              buttonIsDown[i] = false;
+              
+              if (!buttonHeldTriggered[i])
               {
-                switch (i)                    // Switches 1 to 4: Toggle respective relay
-                {
-                  case 0: relayToggle(1); break;
-                  case 1: relayToggle(2); break;
-                  case 2: relayToggle(3); break;
-                  case 3: relayToggle(4); break;
-                }
+                if (i == 4) dimm_Dn();          // SwitchPin5 short click: Step down -1
+                else if (i == 5) dimm_Up();     // SwitchPin6 short click: Step up +1
               }
             }
           }
@@ -439,7 +444,7 @@ void handleWallSwitches()
     {
       if (currentMillis - buttonPressStartTime[i] >= LONG_PRESS_THRESHOLD)
       {
-        buttonHeldTriggered[i] = true; // Mark as triggered so release doesn't fire a short click
+        buttonHeldTriggered[i] = true; 
         if (i == 4) setDimmerLevel(DIMMER_MIN); // Long hold on Down button jumps straight to 0
         else setDimmerLevel(DIMMER_MAX);      // Long hold on Up button jumps straight to 9
       }
