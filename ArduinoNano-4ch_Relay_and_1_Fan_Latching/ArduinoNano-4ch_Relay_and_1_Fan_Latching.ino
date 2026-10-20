@@ -6,9 +6,18 @@
 
 using namespace ace_button;
 
-// 10 stages (0 to 9) calibrated between 600 and 1
+// 10 stages (0 to 9) mapped between 500 (Full ON) and 16500 (Low/Dim) ticks
 const uint16_t spd[10] = {
-  600, 520, 450, 380, 300, 220, 150, 90, 40, 1
+  16500, // Stage 0: Min Brightness / Dim (~8250 µs delay)
+  14724, // Stage 1
+  12946, // Stage 2
+  11168, // Stage 3
+  9390,  // Stage 4
+  7612,  // Stage 5
+  5834,  // Stage 6
+  4056,  // Stage 7
+  2278,  // Stage 8
+  500    // Stage 9: Max Brightness (~250 µs delay)
 };
 
 auto timer = timer_create_default();
@@ -53,14 +62,12 @@ String inputBuffer;
 uint8_t dimm_value = 0;
 bool triacState = false;
 
-// Variables to track previous state of standard wall switches
-bool lastSwitchStates[6] = {HIGH, HIGH, HIGH, HIGH, HIGH, HIGH};
-
-// Variables for tracking long-press duration cleanly
-unsigned long switchPressStartTime[6] = {0, 0, 0, 0, 0, 0};
-bool switchHeldTriggered[6] = {false, false, false, false, false, false};
-bool switchIsDown[6] = {false, false, false, false, false, false};
-const unsigned long LONG_PRESS_THRESHOLD = 1200; // 1.2 seconds
+// Variables to track momentary button states for tactile switches
+bool buttonLastStates[6] = {HIGH, HIGH, HIGH, HIGH, HIGH, HIGH};
+unsigned long buttonPressStartTime[6] = {0, 0, 0, 0, 0, 0};
+bool buttonHeldTriggered[6] = {false, false, false, false, false, false};
+bool buttonIsDown[6] = {false, false, false, false, false, false};
+const unsigned long LONG_PRESS_THRESHOLD = 1200; // 1.2 seconds for long press
 
 ButtonConfig config1;
 ButtonConfig config2;
@@ -81,6 +88,7 @@ void all_Switch_OFF();
 void sendTasmotaStatus(int relayNum, bool state);
 void sendDimmerStatus();
 bool sendPeriodicStatus(void*);
+void setDimmerLevel(uint8_t val);
 
 void applyDimmer()
 {
@@ -90,7 +98,7 @@ void applyDimmer()
   }
   else
   {
-    atmega328_16mhz_ac_phase_control.set_ac_power(0);
+    atmega328_16mhz_ac_phase_control.set_ac_power(19500); // 19500 ticks = fully OFF
   }
 }
 
@@ -118,7 +126,7 @@ void triacOff()
 {
   triacState = false;
   dimm_value = DIMMER_MIN; 
-  atmega328_16mhz_ac_phase_control.set_ac_power(0);
+  atmega328_16mhz_ac_phase_control.set_ac_power(19500); // Fully OFF
   EEPROM.update(EEPROM_DIMMER, dimm_value);
   EEPROM.update(EEPROM_TRIAC_STATE, 0);
   sendDimmerStatus();
@@ -133,7 +141,6 @@ void triacOnOff()
 
 void dimm_Up()
 {
-  // If the dimmer is currently off (0), tap up should start smoothly at level 1 instead of jumping to max/EEPROM memory
   if (!triacState) 
   { 
     setDimmerLevel(1); 
@@ -374,6 +381,7 @@ void handleSerialControl()
   }
 }
 
+// Tactile momentary push-button handler with short-click and long-press support
 void handleWallSwitches()
 {
   uint8_t pins[6] = {SwitchPin1, SwitchPin2, SwitchPin3, SwitchPin4, SwitchPin5, SwitchPin6};
@@ -381,35 +389,38 @@ void handleWallSwitches()
   
   for (int i = 0; i < 6; i++)
   {
-    bool rawState = digitalRead(pins[i]);
+    bool currentState = digitalRead(pins[i]);
     
-    if (rawState != lastSwitchStates[i])
+    // Detect change for button press/release with software debouncing
+    if (currentState != buttonLastStates[i])
     {
-      delay(15); 
-      rawState = digitalRead(pins[i]);
+      delay(15); // Debounce delay
+      currentState = digitalRead(pins[i]);
       
-      if (rawState != lastSwitchStates[i])
+      if (currentState != buttonLastStates[i])
       {
-        lastSwitchStates[i] = rawState;
+        buttonLastStates[i] = currentState;
         
-        if (rawState == LOW)
+        if (currentState == LOW) // Button Pressed Down
         {
-          switchIsDown[i] = true;
-          switchPressStartTime[i] = currentMillis;
-          switchHeldTriggered[i] = false;
+          buttonIsDown[i] = true;
+          buttonPressStartTime[i] = currentMillis;
+          buttonHeldTriggered[i] = false;
         }
-        else
+        else // Button Released Up
         {
-          if (switchIsDown[i])
+          if (buttonIsDown[i])
           {
-            switchIsDown[i] = false;
-            if (!switchHeldTriggered[i])
+            buttonIsDown[i] = false;
+            
+            // If released before long-press threshold, treat as a short click/tap
+            if (!buttonHeldTriggered[i])
             {
-              if (i == 4) dimm_Dn();
-              else if (i == 5) dimm_Up();
+              if (i == 4) dimm_Dn();          // SwitchPin5 short click: Step down -1
+              else if (i == 5) dimm_Up();     // SwitchPin6 short click: Step up +1
               else
               {
-                switch (i)
+                switch (i)                    // Switches 1 to 4: Toggle respective relay
                 {
                   case 0: relayToggle(1); break;
                   case 1: relayToggle(2); break;
@@ -423,13 +434,14 @@ void handleWallSwitches()
       }
     }
     
-    if ((i == 4 || i == 5) && switchIsDown[i] && !switchHeldTriggered[i])
+    // Check for continuous hold while button is kept pressed down (for SwitchPin5 and SwitchPin6)
+    if ((i == 4 || i == 5) && buttonIsDown[i] && !buttonHeldTriggered[i])
     {
-      if (currentMillis - switchPressStartTime[i] >= LONG_PRESS_THRESHOLD)
+      if (currentMillis - buttonPressStartTime[i] >= LONG_PRESS_THRESHOLD)
       {
-        switchHeldTriggered[i] = true;
-        if (i == 4) setDimmerLevel(DIMMER_MIN);
-        else setDimmerLevel(DIMMER_MAX);
+        buttonHeldTriggered[i] = true; // Mark as triggered so release doesn't fire a short click
+        if (i == 4) setDimmerLevel(DIMMER_MIN); // Long hold on Down button jumps straight to 0
+        else setDimmerLevel(DIMMER_MAX);      // Long hold on Up button jumps straight to 9
       }
     }
   }
@@ -472,7 +484,7 @@ void setup()
     if(i==3) p = SwitchPin4;
     if(i==4) p = SwitchPin5;
     if(i==5) p = SwitchPin6;
-    lastSwitchStates[i] = digitalRead(p);
+    buttonLastStates[i] = digitalRead(p);
   }
 
   delay(500);
@@ -485,6 +497,6 @@ void loop()
 {
   ir_remote();
   handleSerialControl();
-  handleWallSwitches();
+  handleWallSwitches(); 
   timer.tick();
 }
