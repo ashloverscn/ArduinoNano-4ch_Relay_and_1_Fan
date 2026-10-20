@@ -6,9 +6,18 @@
 
 using namespace ace_button;
 
-// 10 stages (0 to 9) calibrated between 600 and 1[cite: 1]
+// 10 stages (0 to 9) mapped between 500 (Full ON) and 16500 (Low/Dim) ticks
 const uint16_t spd[10] = {
-  600, 520, 450, 380, 300, 220, 150, 90, 40, 1
+  16500, // Stage 0: Min Brightness / Dim (~8250 µs delay)
+  14724, // Stage 1
+  12946, // Stage 2
+  11168, // Stage 3
+  9390,  // Stage 4
+  7612,  // Stage 5
+  5834,  // Stage 6
+  4056,  // Stage 7
+  2278,  // Stage 8
+  500    // Stage 9: Max Brightness (~250 µs delay)
 };
 
 auto timer = timer_create_default();
@@ -79,6 +88,7 @@ void all_Switch_OFF();
 void sendTasmotaStatus(int relayNum, bool state);
 void sendDimmerStatus();
 bool sendPeriodicStatus(void*);
+void setDimmerLevel(uint8_t val);
 
 void applyDimmer()
 {
@@ -88,7 +98,7 @@ void applyDimmer()
   }
   else
   {
-    atmega328_16mhz_ac_phase_control.set_ac_power(0);
+    atmega328_16mhz_ac_phase_control.set_ac_power(19500); // 19500 ticks = fully OFF
   }
 }
 
@@ -116,7 +126,7 @@ void triacOff()
 {
   triacState = false;
   dimm_value = DIMMER_MIN; 
-  atmega328_16mhz_ac_phase_control.set_ac_power(0);
+  atmega328_16mhz_ac_phase_control.set_ac_power(19500); // Fully OFF
   EEPROM.update(EEPROM_DIMMER, dimm_value);
   EEPROM.update(EEPROM_TRIAC_STATE, 0);
   sendDimmerStatus();
@@ -487,6 +497,6 @@ void loop()
 {
   ir_remote();
   handleSerialControl();
-  handleWallSwitches(); // Now handles tactile push buttons perfectly
+  handleWallSwitches(); 
   timer.tick();
 }
