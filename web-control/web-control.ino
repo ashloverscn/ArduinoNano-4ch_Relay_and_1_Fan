@@ -1,11 +1,24 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <ArduinoJson.h>
+#include "Adafruit_MQTT.h"
+#include "Adafruit_MQTT_Client.h"
 
+// --- Wi-Fi & MQTT Credentials ---
 const char* ssid = "ash_jio_2G";
 const char* password = "ThundersnO0w@,,#";
 
+#define AIO_SERVER      "io.adafruit.com"
+#define AIO_SERVERPORT  1883  
+#define AIO_USERNAME    "ashloverscn"
+#define AIO_KEY         "568793ccdb9548acbfdb95509d7891da"
+
+// --- Global Clients & State ---
 ESP8266WebServer server(80);
+WiFiClient client; 
+
+Adafruit_MQTT_Client mqtt(&client, AIO_SERVER, AIO_SERVERPORT, AIO_USERNAME, AIO_KEY);
+Adafruit_MQTT_Publish testFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/test");
 
 const uint8_t relayPins[4] = {5, 4, 14, 12};
 const uint8_t dimmerPin = 13;
@@ -16,6 +29,9 @@ bool relayStates[4] = {false, false, false, false};
 uint8_t dimmerValue = 0;
 
 String serialBuffer;
+
+// Forward declaration
+void MQTT_connect();
 
 const char webpage[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
@@ -453,6 +469,11 @@ void sendHttpState() {
 void setup() {
   Serial.begin(115200);
   Serial.setTimeout(50);
+  delay(500);
+
+  Serial.println("\n\n========================================");
+  Serial.println("[INFO] ESP8266 Booting Up...");
+  Serial.println("========================================");
 
   for (uint8_t i = 0; i < 4; i++) {
     digitalWrite(relayPins[i], RELAY_ACTIVE_LOW ? HIGH : LOW);
@@ -467,13 +488,39 @@ void setup() {
 
   writeDimmer(0);
 
+  // --- Verbose Wi-Fi Setup with DHCP ---
+  Serial.println("[WIFI] Setting station mode...");
   WiFi.mode(WIFI_STA);
+  
+  Serial.print("[WIFI] Device MAC Address: ");
+  Serial.println(WiFi.macAddress());
+
+  Serial.print("[WIFI] Initiating connection to SSID: ");
+  Serial.println(ssid);
+  
   WiFi.begin(ssid, password);
 
+  unsigned long startTime = millis();
   while (WiFi.status() != WL_CONNECTED) {
-    delay(300);
+    delay(1000);
+    Serial.print("[WIFI] Waiting for connection... Current Status ID: ");
+    Serial.println(WiFi.status());
+    
+    if (millis() - startTime > 30000) {
+      Serial.println("[WIFI ERROR] Connection timeout! Restarting ESP8266...");
+      ESP.restart();
+    }
   }
+  
+  Serial.println("[WIFI SUCCESS] Connected to network!");
+  Serial.print("[WIFI] Assigned Local IP Address: ");
+  Serial.println(WiFi.localIP());
+  Serial.print("[WIFI] Signal Strength (RSSI): ");
+  Serial.print(WiFi.RSSI());
+  Serial.println(" dBm");
+  Serial.println("========================================\n");
 
+  // --- Web Server Endpoints ---
   server.on("/", HTTP_GET, []() {
     server.send_P(200, "text/html", webpage);
   });
@@ -499,7 +546,6 @@ void setup() {
 
     writeRelay(n - 1, value == "ON");
 
-    // Send concise ACK packet
     StaticJsonDocument<48> ack;
     char key[8];
     snprintf(key, sizeof(key), "POWER%u", n);
@@ -534,7 +580,6 @@ void setup() {
 
     writeDimmer(value);
 
-    // Send concise ACK packet
     StaticJsonDocument<32> ack;
     ack["Dimmer"] = dimmerValue;
     
@@ -553,7 +598,49 @@ void setup() {
   printState();
 }
 
+uint32_t x = 0;
+unsigned long lastMqttCheck = 0;
+
 void loop() {
   server.handleClient();
   handleSerial();
+
+  // Periodically check and maintain MQTT connection non-blockingly
+  if (millis() - lastMqttCheck > 10000) {
+    lastMqttCheck = millis();
+    
+    MQTT_connect();
+    mqtt.processPackets(100);
+    
+    if (mqtt.connected()) {
+      testFeed.publish(x++);
+    }
+  }
+}
+
+void MQTT_connect() {
+  int8_t ret;
+
+  if (mqtt.connected()) {
+    return;
+  }
+
+  Serial.println("\n[MQTT] Connection lost or not established.");
+  Serial.print("[MQTT] Connecting to broker -> Server: ");
+  Serial.print(AIO_SERVER);
+  Serial.print(" | Port: ");
+  Serial.print(AIO_SERVERPORT);
+  Serial.print(" | User: ");
+  Serial.println(AIO_USERNAME);
+
+  ret = mqtt.connect();
+  if (ret != 0) {
+       Serial.print("[MQTT ERROR] Connection failed with error code: ");
+       Serial.println(ret);
+       Serial.print("[MQTT ERROR] Description: ");
+       Serial.println(mqtt.connectErrorString(ret));
+       mqtt.disconnect();
+  } else {
+       Serial.println("[MQTT SUCCESS] Successfully connected to Adafruit IO Broker!");
+  }
 }
