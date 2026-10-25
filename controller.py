@@ -1,9 +1,12 @@
 import json
+import os
 import threading
 import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 import serial
 import serial.tools.list_ports
+
+CONFIG_FILE = "arduino_config.json"
 
 
 class ArduinoControllerApp:
@@ -25,6 +28,7 @@ class ArduinoControllerApp:
 
     self.create_widgets()
     self.refresh_ports()
+    self.load_saved_settings()  # Pre-loads saved port/baud without auto-connecting
 
   def create_widgets(self):
     # --- CONNECTION FRAME ---
@@ -96,7 +100,6 @@ class ArduinoControllerApp:
     self.dimmer_slider.pack(
         side="left", expand=True, fill="x", padx=10, pady=5
     )
-    # Bind release event so it only sends command when user drops the slider handle
     self.dimmer_slider.bind("<ButtonRelease-1>", self.on_slider_release)
 
     ttk.Button(
@@ -139,8 +142,38 @@ class ArduinoControllerApp:
   def refresh_ports(self):
     ports = [port.device for port in serial.tools.list_ports.comports()]
     self.port_combo["values"] = ports
-    if ports:
+    if ports and not self.port_combo.get():
       self.port_combo.current(0)
+
+  def load_config(self):
+    if os.path.exists(CONFIG_FILE):
+      try:
+        with open(CONFIG_FILE, "r") as f:
+          return json.load(f)
+      except Exception:
+        pass
+    return {}
+
+  def save_config(self, port, baud):
+    try:
+      with open(CONFIG_FILE, "w") as f:
+        json.dump({"port": port, "baud": baud}, f)
+    except Exception:
+      pass
+
+  def load_saved_settings(self):
+    config = self.load_config()
+    saved_port = config.get("port")
+    saved_baud = config.get("baud")
+
+    available_ports = list(self.port_combo["values"])
+
+    if saved_baud:
+      self.baud_entry.delete(0, tk.END)
+      self.baud_entry.insert(0, str(saved_baud))
+
+    if saved_port and saved_port in available_ports:
+      self.port_combo.set(saved_port)
 
   def toggle_connection(self):
     if not self.is_connected:
@@ -158,6 +191,9 @@ class ArduinoControllerApp:
         self.connect_btn.config(text="Disconnect")
         self.port_combo.config(state="disabled")
         self.baud_entry.config(state="disabled")
+
+        # Save successful connection details
+        self.save_config(selected_port, baudrate)
 
         # Start background thread to listen for incoming Arduino serial data
         self.read_thread = threading.Thread(target=self.read_serial, daemon=True)
@@ -203,7 +239,6 @@ class ArduinoControllerApp:
 
   def on_slider_release(self, event):
     val_int = int(round(self.dimmer_slider.get()))
-    # Snap slider position directly to the nearest discrete integer step
     self.dimmer_slider.set(val_int)
     if val_int != self.last_sent_dimmer:
       self.last_sent_dimmer = val_int
