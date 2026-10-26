@@ -263,53 +263,91 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
     }
 }
 
-// Helper function to send command and immediately send STATUS
-void sendWithStatus(String jsonOut) {
-    Serial.println(jsonOut);
-    broadcastLog(">> " + jsonOut);
-    delay(15);
-    Serial.println("STATUS");
-    broadcastLog(">> STATUS");
-    delay(15);
-}
-
-// --- Translate Web UI Actions and Force STATUS after Every Command ---
+// --- Translate Web UI Actions and Append STATUS ---
 void handleCommand(String cmd) {
     cmd.trim();
 
     for (int i = 1; i <= 4; i++) {
         if (cmd == "POWER" + String(i) + " ON") {
-            sendWithStatus("{\"POWER" + String(i) + "\":\"ON\"}");
+            String jsonOut = "{\"POWER" + String(i) + "\":\"ON\"}";
+            Serial.println(jsonOut);
+            broadcastLog(">> " + jsonOut);
+            delay(10);
+            Serial.println("STATUS");
+            broadcastLog(">> STATUS");
             return;
         } else if (cmd == "POWER" + String(i) + " OFF") {
-            sendWithStatus("{\"POWER" + String(i) + "\":\"OFF\"}");
+            String jsonOut = "{\"POWER" + String(i) + "\":\"OFF\"}";
+            Serial.println(jsonOut);
+            broadcastLog(">> " + jsonOut);
+            delay(10);
+            Serial.println("STATUS");
+            broadcastLog(">> STATUS");
             return;
         }
     }
 
     if (cmd.startsWith("DIMMER ")) {
         int val = cmd.substring(7).toInt();
-        sendWithStatus("{\"Dimmer\":" + String(val) + "}");
+        String jsonOut = "{\"Dimmer\":" + String(val) + "}";
+        Serial.println(jsonOut);
+        broadcastLog(">> " + jsonOut);
     } else if (cmd == "DIMM_UP") {
         if (dimmerValue < 9) dimmerValue++;
-        sendWithStatus("{\"Dimmer\":" + String(dimmerValue) + "}");
+        String jsonOut = "{\"Dimmer\":" + String(dimmerValue) + "}";
+        Serial.println(jsonOut);
+        broadcastLog(">> " + jsonOut);
     } else if (cmd == "DIMM_DN") {
         if (dimmerValue > 0) dimmerValue--;
-        sendWithStatus("{\"Dimmer\":" + String(dimmerValue) + "}");
+        String jsonOut = "{\"Dimmer\":" + String(dimmerValue) + "}";
+        Serial.println(jsonOut);
+        broadcastLog(">> " + jsonOut);
     } else if (cmd == "ALL_ON") {
         for (int i = 1; i <= 4; i++) {
-            sendWithStatus("{\"POWER" + String(i) + "\":\"ON\"}");
+            String jsonOut = "{\"POWER" + String(i) + "\":\"ON\"}";
+            Serial.println(jsonOut);
+            broadcastLog(">> " + jsonOut);
+            delay(20);
+            Serial.println("STATUS");
+            broadcastLog(">> STATUS");
+            delay(20);
         }
-        sendWithStatus("{\"Dimmer\":9}");
+        dimmerValue = 9;
+        String dimOut = "{\"Dimmer\":9}";
+        Serial.println(dimOut);
+        broadcastLog(">> " + dimOut);
+        delay(20);
+        Serial.println("STATUS");
+        broadcastLog(">> STATUS");
+        return;
     } else if (cmd == "ALL_OFF") {
         for (int i = 1; i <= 4; i++) {
-            sendWithStatus("{\"POWER" + String(i) + "\":\"OFF\"}");
+            String jsonOut = "{\"POWER" + String(i) + "\":\"OFF\"}";
+            Serial.println(jsonOut);
+            broadcastLog(">> " + jsonOut);
+            delay(20);
+            Serial.println("STATUS");
+            broadcastLog(">> STATUS");
+            delay(20);
         }
-        sendWithStatus("{\"Dimmer\":0}");
+        dimmerValue = 0;
+        String dimOut = "{\"Dimmer\":0}";
+        Serial.println(dimOut);
+        broadcastLog(">> " + dimOut);
+        delay(20);
+        Serial.println("STATUS");
+        broadcastLog(">> STATUS");
+        return;
     } else if (cmd == "STATUS") {
         Serial.println("STATUS");
         broadcastLog(">> STATUS");
+        return;
     }
+
+    // Append STATUS after standard slider/dimmer updates
+    delay(10);
+    Serial.println("STATUS");
+    broadcastLog(">> STATUS");
 }
 
 // --- Parse Incoming Serial Status JSON from Peripheral ---
