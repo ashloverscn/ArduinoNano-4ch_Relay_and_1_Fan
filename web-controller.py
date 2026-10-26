@@ -1,6 +1,8 @@
 import json
 import os
 import threading
+import tkinter as tk
+from tkinter import messagebox, ttk
 from flask import Flask, render_template_string, jsonify, request
 from flask_socketio import SocketIO
 import serial
@@ -8,6 +10,7 @@ import serial.tools.list_ports
 
 CONFIG_FILE = "arduino_config.json"
 
+# --- FLASK & SOCKETIO SETUP ---
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "arduino_secret_key"
 socketio = SocketIO(app, cors_allowed_origins="*")
@@ -22,6 +25,7 @@ class ArduinoController:
         self.last_sent_dimmer = 0
         self.selected_port = ""
         self.selected_baud = 115200
+        self.gui_callback = None  # To update Tkinter UI
         self.load_saved_settings()
 
     def load_config(self):
@@ -48,8 +52,7 @@ class ArduinoController:
     def get_ports(self):
         try:
             return [port.device for port in serial.tools.list_ports.comports()]
-        except Exception as e:
-            print(f"Error listing ports: {e}")
+        except Exception:
             return []
 
     def connect(self, port, baudrate):
@@ -71,6 +74,9 @@ class ArduinoController:
 
             self.log_message(f"Connected to {port} at {baudrate} baud.")
             self.send_command("STATUS")
+            
+            if self.gui_callback:
+                self.gui_callback("CONNECTED", port, baudrate)
             return True, "Connected successfully."
         except Exception as e:
             self.is_connected = False
@@ -84,6 +90,8 @@ class ArduinoController:
             except Exception as e:
                 print(e)
         self.log_message("Disconnected.")
+        if self.gui_callback:
+            self.gui_callback("DISCONNECTED", "", "")
 
     def send_command(self, cmd):
         if not self.is_connected or not self.ser or not self.ser.is_open:
@@ -134,7 +142,86 @@ class ArduinoController:
 
 controller = ArduinoController()
 
-# --- EMBEDDED HTML/JS UI ---
+
+# --- PC-SIDE TKINTER GUI (SERIAL CONNECTION PANEL) ---
+class PCConnectionApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("PC Serial Connection Manager")
+        self.root.geometry("660x190")
+        self.root.minsize(550, 160)
+        self.root.resizable(True, True)  # Window is now resizable
+
+        controller.gui_callback = self.update_gui_state
+
+        self.create_widgets()
+        self.refresh_ports()
+
+    def create_widgets(self):
+        conn_frame = ttk.LabelFrame(self.root, text="USB Serial Connection (Host PC)", padding=15)
+        conn_frame.pack(fill="both", expand=True, padx=15, pady=15)
+
+        # Configure grid column weights for responsiveness
+        conn_frame.columnsize = 5
+        for col in range(6):
+            conn_frame.columnconfigure(col, weight=1)
+
+        ttk.Label(conn_frame, text="Port:").grid(row=0, column=0, sticky="w", padx=5)
+        self.port_combo = ttk.Combobox(conn_frame, width=18, state="readonly")
+        self.port_combo.grid(row=0, column=1, padx=5, sticky="ew")
+
+        refresh_btn = ttk.Button(conn_frame, text="Refresh", command=self.refresh_ports)
+        refresh_btn.grid(row=0, column=2, padx=5)
+
+        ttk.Label(conn_frame, text="Baudrate:").grid(row=0, column=3, sticky="w", padx=5)
+        self.baud_entry = ttk.Entry(conn_frame, width=12)
+        self.baud_entry.insert(0, str(controller.selected_baud))
+        self.baud_entry.grid(row=0, column=4, padx=5, sticky="ew")
+
+        self.connect_btn = ttk.Button(conn_frame, text="Connect", command=self.toggle_connection)
+        self.connect_btn.grid(row=0, column=5, padx=5, sticky="ew")
+
+        # Status Label inside Tkinter
+        self.status_lbl = ttk.Label(conn_frame, text="Status: Disconnected", foreground="red", font=("Arial", 10, "bold"))
+        self.status_lbl.grid(row=1, column=0, columnspan=6, sticky="w", padx=5, pady=12)
+
+    def refresh_ports(self):
+        ports = controller.get_ports()
+        self.port_combo["values"] = ports
+        if controller.selected_port in ports:
+            self.port_combo.set(controller.selected_port)
+        elif ports:
+            self.port_combo.current(0)
+
+    def toggle_connection(self):
+        if not controller.is_connected:
+            port = self.port_combo.get()
+            baud = self.baud_entry.get()
+            if not port:
+                messagebox.showerror("Error", "Please select a valid COM port.")
+                return
+            success, msg = controller.connect(port, baud)
+            if not success:
+                messagebox.showerror("Connection Error", msg)
+        else:
+            controller.disconnect()
+
+    def update_gui_state(self, state, port, baud):
+        def update():
+            if state == "CONNECTED":
+                self.connect_btn.config(text="Disconnect")
+                self.port_combo.config(state="disabled")
+                self.baud_entry.config(state="disabled")
+                self.status_lbl.config(text=f"Status: Connected to {port} ({baud} baud)", foreground="green")
+            else:
+                self.connect_btn.config(text="Connect")
+                self.port_combo.config(state="readonly")
+                self.baud_entry.config(state="normal")
+                self.status_lbl.config(text="Status: Disconnected", foreground="red")
+        self.root.after(0, update)
+
+
+# --- EMBEDDED WEB DASHBOARD HTML/JS ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -176,22 +263,17 @@ HTML_TEMPLATE = """
             text-transform: uppercase;
         }
         .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-        select, input, button {
-            padding: 8px 12px;
+        button {
+            padding: 10px 15px;
             font-size: 14px;
             border-radius: 4px;
-            border: 1px solid #ccc;
-        }
-        button {
+            border: none;
             cursor: pointer;
             background-color: #007bff;
             color: white;
-            border: none;
             transition: 0.2s;
         }
         button:hover { background-color: #0056b3; }
-        button.disconnect { background-color: #dc3545; }
-        button.disconnect:hover { background-color: #bd2130; }
         
         .relay-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
         .relay-btn {
@@ -217,9 +299,11 @@ HTML_TEMPLATE = """
             box-sizing: border-box;
             overflow-y: scroll;
             border-radius: 4px;
-            resize: vertical;
         }
         .flex-fill { flex: 1; }
+        #connectionStatus { font-weight: bold; padding: 5px 10px; border-radius: 4px; display: inline-block; }
+        .status-disconnected { background: #ffebee; color: #c62828; }
+        .status-connected { background: #e8f5e9; color: #2e7d32; }
     </style>
 </head>
 <body>
@@ -227,22 +311,13 @@ HTML_TEMPLATE = """
 <div class="container">
     <h2>Arduino Home Automation</h2>
 
+    <!-- Connection Status Banner -->
     <div class="card">
-        <div class="card-title">Serial Connection</div>
-        <div class="row">
-            <label>Port:</label>
-            <select id="portSelect">
-                <option value="">-- Select Port --</option>
-            </select>
-            <button onclick="refreshPorts()">Refresh</button>
-
-            <label>Baudrate:</label>
-            <input type="number" id="baudRate" value="115200" style="width: 80px;">
-
-            <button id="connectBtn" onclick="toggleConnection()">Connect</button>
-        </div>
+        <div class="card-title">PC Serial Status</div>
+        <div id="connectionStatus" class="status-disconnected">Status: Checking connection on Host PC...</div>
     </div>
 
+    <!-- Relays Control -->
     <div class="card">
         <div class="card-title">Relay Controls</div>
         <div class="relay-grid">
@@ -253,6 +328,7 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
+    <!-- Dimmer Control -->
     <div class="card">
         <div class="card-title">Dimmer Control (0-9)</div>
         <div class="row">
@@ -264,6 +340,7 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
+    <!-- Global & Utilities -->
     <div class="card">
         <div class="card-title">Global Commands & Status</div>
         <div class="row">
@@ -273,6 +350,7 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
+    <!-- Console Log -->
     <div class="card">
         <div class="card-title">Serial Console / Feedback</div>
         <div id="console"></div>
@@ -281,96 +359,34 @@ HTML_TEMPLATE = """
 
 <script>
     const socket = io();
-    let isConnected = false;
     let relayStates = [false, false, false, false];
-
-    async function refreshPorts() {
-        try {
-            const res = await fetch('/api/ports');
-            const data = await res.json();
-            const select = document.getElementById('portSelect');
-            select.innerHTML = '<option value="">-- Select Port --</option>';
-            
-            data.ports.forEach(port => {
-                const opt = document.createElement('option');
-                opt.value = port;
-                opt.innerText = port;
-                if (port === data.saved_port) opt.selected = true;
-                select.appendChild(opt);
-            });
-            if (data.saved_baud) {
-                document.getElementById('baudRate').value = data.saved_baud;
-            }
-            updateConnectionState(data.is_connected);
-        } catch (err) {
-            console.error("Failed to fetch ports:", err);
-        }
-    }
-
-    async function toggleConnection() {
-        const port = document.getElementById('portSelect').value;
-        const baud = document.getElementById('baudRate').value;
-
-        if (!isConnected && !port) {
-            alert("Please select a COM port first!");
-            return;
-        }
-
-        try {
-            if (!isConnected) {
-                const res = await fetch('/api/connect', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({port, baud})
-                });
-                const data = await res.json();
-                if (!data.success) {
-                    alert("Connection Error: " + data.message);
-                }
-            } else {
-                await fetch('/api/disconnect', {method: 'POST'});
-            }
-            checkStatus();
-        } catch (err) {
-            alert("Network or Server Error: " + err);
-        }
-    }
 
     async function checkStatus() {
         try {
             const res = await fetch('/api/status');
             const data = await res.json();
-            updateConnectionState(data.is_connected);
+            updateConnectionBanner(data.is_connected);
             data.relays.forEach((state, i) => updateRelayUI(i + 1, state));
             document.getElementById('dimmerSlider').value = data.dimmer;
         } catch (err) {
-            console.error("Failed to check status:", err);
+            console.error(err);
         }
     }
 
-    function updateConnectionState(connected) {
-        isConnected = connected;
-        const btn = document.getElementById('connectBtn');
-        const portSelect = document.getElementById('portSelect');
-        const baudRate = document.getElementById('baudRate');
-
+    function updateConnectionBanner(connected) {
+        const banner = document.getElementById('connectionStatus');
         if (connected) {
-            btn.innerText = "Disconnect";
-            btn.classList.add("disconnect");
-            portSelect.disabled = true;
-            baudRate.disabled = true;
+            banner.innerText = "Status: Connected (Controlled via PC Host)";
+            banner.className = "status-connected";
         } else {
-            btn.innerText = "Connect";
-            btn.classList.remove("disconnect");
-            portSelect.disabled = false;
-            baudRate.disabled = false;
+            banner.innerText = "Status: Disconnected (Please connect via PC Host App)";
+            banner.className = "status-disconnected";
         }
     }
 
     function toggleRelay(relayNum) {
         const currentState = relayStates[relayNum - 1];
-        const cmd = `POWER${relayNum} ${currentState ? 'OFF' : 'ON'}`;
-        sendCommand(cmd);
+        sendCommand(`POWER${relayNum} ${currentState ? 'OFF' : 'ON'}`);
     }
 
     function onSliderChange(val) {
@@ -378,15 +394,11 @@ HTML_TEMPLATE = """
     }
 
     async function sendCommand(cmd) {
-        try {
-            await fetch('/api/command', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({command: cmd})
-            });
-        } catch (err) {
-            console.error("Failed to send command:", err);
-        }
+        await fetch('/api/command', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({command: cmd})
+        });
     }
 
     function updateRelayUI(relayNum, isOn) {
@@ -413,26 +425,18 @@ HTML_TEMPLATE = """
         document.getElementById('dimmerSlider').value = data.value;
     });
 
-    refreshPorts();
     checkStatus();
+    setInterval(checkStatus, 3000);
 </script>
 
 </body>
 </html>
 """
 
+# --- FLASK ROUTES ---
 @app.route("/")
 def index():
     return render_template_string(HTML_TEMPLATE)
-
-@app.route("/api/ports")
-def get_ports():
-    return jsonify({
-        "ports": controller.get_ports(),
-        "saved_port": controller.selected_port,
-        "saved_baud": controller.selected_baud,
-        "is_connected": controller.is_connected
-    })
 
 @app.route("/api/status")
 def get_status():
@@ -442,17 +446,6 @@ def get_status():
         "dimmer": controller.last_sent_dimmer
     })
 
-@app.route("/api/connect", methods=["POST"])
-def connect_serial():
-    data = request.json or {}
-    success, message = controller.connect(data.get("port"), data.get("baud"))
-    return jsonify({"success": success, "message": message})
-
-@app.route("/api/disconnect", methods=["POST"])
-def disconnect_serial():
-    controller.disconnect()
-    return jsonify({"success": True})
-
 @app.route("/api/command", methods=["POST"])
 def send_command():
     data = request.json or {}
@@ -460,7 +453,16 @@ def send_command():
     if cmd:
         success = controller.send_command(cmd)
         return jsonify({"success": success})
-    return jsonify({"success": False, "message": "No command provided."})
+    return jsonify({"success": False})
+
 
 if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=80, debug=False)
+    server_thread = threading.Thread(
+        target=lambda: socketio.run(app, host="0.0.0.0", port=80, debug=False, use_reloader=False),
+        daemon=True
+    )
+    server_thread.start()
+
+    root = tk.Tk()
+    pc_app = PCConnectionApp(root)
+    root.mainloop()
