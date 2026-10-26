@@ -7,10 +7,6 @@
 const char* ssid = "ash_jio_2G";
 const char* password = "ThundersnO0w@,,#";
 
-// --- GPIO Pin Definitions ---
-const int RELAY_PINS[4] = {5, 4, 0, 2}; // D1, D2, D3, D4 on NodeMCU
-const int DIMMER_PIN = 14;               // D5 (PWM pin for dimmer)
-
 // --- Controller State ---
 bool relayStates[4] = {false, false, false, false};
 int dimmerValue = 0; // 0 to 9
@@ -170,6 +166,7 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
         ws.onopen = function(event) {
             updateConnectionBanner(true);
             appendConsole("Connected to ESP8266 WebSocket server.");
+            sendCommand('STATUS');
         };
         
         ws.onclose = function(event) {
@@ -266,40 +263,52 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
     }
 }
 
-// --- Translate Web UI Actions into Target JSON Command Strings ---
+// Helper function to send command and immediately send STATUS
+void sendWithStatus(String jsonOut) {
+    Serial.println(jsonOut);
+    broadcastLog(">> " + jsonOut);
+    delay(15);
+    Serial.println("STATUS");
+    broadcastLog(">> STATUS");
+    delay(15);
+}
+
+// --- Translate Web UI Actions and Force STATUS after Every Command ---
 void handleCommand(String cmd) {
     cmd.trim();
-    String jsonOut = "";
 
     for (int i = 1; i <= 4; i++) {
         if (cmd == "POWER" + String(i) + " ON") {
-            jsonOut = "{\"POWER" + String(i) + "\":\"ON\"}";
+            sendWithStatus("{\"POWER" + String(i) + "\":\"ON\"}");
+            return;
         } else if (cmd == "POWER" + String(i) + " OFF") {
-            jsonOut = "{\"POWER" + String(i) + "\":\"OFF\"}";
+            sendWithStatus("{\"POWER" + String(i) + "\":\"OFF\"}");
+            return;
         }
     }
 
     if (cmd.startsWith("DIMMER ")) {
         int val = cmd.substring(7).toInt();
-        jsonOut = "{\"Dimmer\":" + String(val) + "}";
+        sendWithStatus("{\"Dimmer\":" + String(val) + "}");
     } else if (cmd == "DIMM_UP") {
         if (dimmerValue < 9) dimmerValue++;
-        jsonOut = "{\"Dimmer\":" + String(dimmerValue) + "}";
+        sendWithStatus("{\"Dimmer\":" + String(dimmerValue) + "}");
     } else if (cmd == "DIMM_DN") {
         if (dimmerValue > 0) dimmerValue--;
-        jsonOut = "{\"Dimmer\":" + String(dimmerValue) + "}";
+        sendWithStatus("{\"Dimmer\":" + String(dimmerValue) + "}");
     } else if (cmd == "ALL_ON") {
-        jsonOut = "{\"POWER1\":\"ON\",\"POWER2\":\"ON\",\"POWER3\":\"ON\",\"POWER4\":\"ON\",\"Dimmer\":9}";
+        for (int i = 1; i <= 4; i++) {
+            sendWithStatus("{\"POWER" + String(i) + "\":\"ON\"}");
+        }
+        sendWithStatus("{\"Dimmer\":9}");
     } else if (cmd == "ALL_OFF") {
-        jsonOut = "{\"POWER1\":\"OFF\",\"POWER2\":\"OFF\",\"POWER3\":\"OFF\",\"POWER4\":\"OFF\",\"Dimmer\":0}";
+        for (int i = 1; i <= 4; i++) {
+            sendWithStatus("{\"POWER" + String(i) + "\":\"OFF\"}");
+        }
+        sendWithStatus("{\"Dimmer\":0}");
     } else if (cmd == "STATUS") {
-        // Optional status query if supported by peripheral
-        jsonOut = ""; 
-    }
-
-    if (jsonOut.length() > 0) {
-        Serial.println(jsonOut);
-        broadcastLog(">> " + jsonOut);
+        Serial.println("STATUS");
+        broadcastLog(">> STATUS");
     }
 }
 
@@ -323,7 +332,6 @@ void parseSerialFeedback(String line) {
                 bool isOn = (doc[key].as<String>() == "ON");
                 if (relayStates[i - 1] != isOn) {
                     relayStates[i - 1] = isOn;
-                    digitalWrite(RELAY_PINS[i - 1], isOn ? HIGH : LOW);
                     stateChanged = true;
                 }
             }
@@ -333,7 +341,6 @@ void parseSerialFeedback(String line) {
             int dimVal = doc["Dimmer"].as<int>();
             if (dimmerValue != dimVal) {
                 dimmerValue = dimVal;
-                analogWrite(DIMMER_PIN, map(dimmerValue, 0, 9, 0, 1023));
                 stateChanged = true;
             }
         }
@@ -373,14 +380,6 @@ void broadcastLog(String message) {
 // --- Setup & Loop ---
 void setup() {
     Serial.begin(115200);
-
-    // Initialize pins
-    for (int i = 0; i < 4; i++) {
-        pinMode(RELAY_PINS[i], OUTPUT);
-        digitalWrite(RELAY_PINS[i], LOW);
-    }
-    pinMode(DIMMER_PIN, OUTPUT);
-    analogWrite(DIMMER_PIN, 0);
 
     // Connect to WiFi
     WiFi.begin(ssid, password);
