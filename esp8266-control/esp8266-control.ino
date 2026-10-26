@@ -8,7 +8,6 @@ const char* ssid = "ash_jio_2G";
 const char* password = "ThundersnO0w@,,#";
 
 // --- GPIO Pin Definitions ---
-// Change these to match your relay and dimmer hardware pins
 const int RELAY_PINS[4] = {5, 4, 0, 2}; // D1, D2, D3, D4 on NodeMCU
 const int DIMMER_PIN = 14;               // D5 (PWM pin for dimmer)
 
@@ -24,6 +23,7 @@ AsyncWebSocket ws("/ws");
 void broadcastState();
 void broadcastLog(String message);
 void handleCommand(String cmd);
+void parseSerialFeedback(String line);
 
 // --- HTML Template (Exact match to original UI) ---
 const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
@@ -170,7 +170,6 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
         ws.onopen = function(event) {
             updateConnectionBanner(true);
             appendConsole("Connected to ESP8266 WebSocket server.");
-            sendCommand('STATUS');
         };
         
         ws.onclose = function(event) {
@@ -252,7 +251,6 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
 // --- WebSocket Event Handler ---
 void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
     if (type == WS_EVT_CONNECT) {
-        // Send initial state upon connection
         broadcastState();
     } else if (type == WS_EVT_DATA) {
         AwsFrameInfo *info = (AwsFrameInfo*)arg;
@@ -262,66 +260,89 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
             DeserializationError error = deserializeJson(doc, (char*)data);
             if (!error && doc.containsKey("command")) {
                 String cmd = doc["command"].as<String>();
-                broadcastLog(">> " + cmd);
                 handleCommand(cmd);
             }
         }
     }
 }
 
-// --- Command Processor ---
+// --- Translate Web UI Actions into Target JSON Command Strings ---
 void handleCommand(String cmd) {
     cmd.trim();
-    
-    // Parse individual relay commands (e.g. POWER1 ON, POWER2 OFF)
+    String jsonOut = "";
+
     for (int i = 1; i <= 4; i++) {
         if (cmd == "POWER" + String(i) + " ON") {
-            relayStates[i - 1] = true;
-            digitalWrite(RELAY_PINS[i - 1], HIGH);
+            jsonOut = "{\"POWER" + String(i) + "\":\"ON\"}";
         } else if (cmd == "POWER" + String(i) + " OFF") {
-            relayStates[i - 1] = false;
-            digitalWrite(RELAY_PINS[i - 1], LOW);
+            jsonOut = "{\"POWER" + String(i) + "\":\"OFF\"}";
         }
     }
 
-    // Global commands
-    if (cmd == "ALL_ON") {
-        for (int i = 0; i < 4; i++) {
-            relayStates[i] = true;
-            digitalWrite(RELAY_PINS[i], HIGH);
-        }
-    } else if (cmd == "ALL_OFF") {
-        for (int i = 0; i < 4; i++) {
-            relayStates[i] = false;
-            digitalWrite(RELAY_PINS[i], LOW);
-        }
-    } 
-    // Dimmer commands
-    else if (cmd.startsWith("DIMMER ")) {
+    if (cmd.startsWith("DIMMER ")) {
         int val = cmd.substring(7).toInt();
-        if (val >= 0 && val <= 9) {
-            dimmerValue = val;
-            analogWrite(DIMMER_PIN, map(dimmerValue, 0, 9, 0, 1023));
-        }
+        jsonOut = "{\"Dimmer\":" + String(val) + "}";
     } else if (cmd == "DIMM_UP") {
         if (dimmerValue < 9) dimmerValue++;
-        analogWrite(DIMMER_PIN, map(dimmerValue, 0, 9, 0, 1023));
+        jsonOut = "{\"Dimmer\":" + String(dimmerValue) + "}";
     } else if (cmd == "DIMM_DN") {
         if (dimmerValue > 0) dimmerValue--;
-        analogWrite(DIMMER_PIN, map(dimmerValue, 0, 9, 0, 1023));
+        jsonOut = "{\"Dimmer\":" + String(dimmerValue) + "}";
+    } else if (cmd == "ALL_ON") {
+        jsonOut = "{\"POWER1\":\"ON\",\"POWER2\":\"ON\",\"POWER3\":\"ON\",\"POWER4\":\"ON\",\"Dimmer\":9}";
+    } else if (cmd == "ALL_OFF") {
+        jsonOut = "{\"POWER1\":\"OFF\",\"POWER2\":\"OFF\",\"POWER3\":\"OFF\",\"POWER4\":\"OFF\",\"Dimmer\":0}";
+    } else if (cmd == "STATUS") {
+        // Optional status query if supported by peripheral
+        jsonOut = ""; 
     }
 
-    // Feedback response JSON matching original format
-    JsonDocument feedback;
-    for (int i = 1; i <= 4; i++) {
-        feedback["POWER" + String(i)] = relayStates[i - 1] ? "ON" : "OFF";
+    if (jsonOut.length() > 0) {
+        Serial.println(jsonOut);
+        broadcastLog(">> " + jsonOut);
     }
-    feedback["Dimmer"] = dimmerValue;
-    
-    String output;
-    serializeJson(feedback, output);
-    broadcastLog("<< " + output);
-    broadcastState();
+}
+
+// --- Parse Incoming Serial Status JSON from Peripheral ---
+void parseSerialFeedback(String line) {
+    line.trim();
+    if (line.length() == 0) return;
+
+    // Log raw incoming feedback to console
+    broadcastLog("<< " + line);
+
+    // Parse incoming JSON feedback (e.g. {"POWER1":"ON","POWER2":"OFF",...})
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, line);
+    if (!error) {
+        bool stateChanged = false;
+
+        for (int i = 1; i <= 4; i++) {
+            String key = "POWER" + String(i);
+            if (doc.containsKey(key)) {
+                bool isOn = (doc[key].as<String>() == "ON");
+                if (relayStates[i - 1] != isOn) {
+                    relayStates[i - 1] = isOn;
+                    digitalWrite(RELAY_PINS[i - 1], isOn ? HIGH : LOW);
+                    stateChanged = true;
+                }
+            }
+        }
+
+        if (doc.containsKey("Dimmer")) {
+            int dimVal = doc["Dimmer"].as<int>();
+            if (dimmerValue != dimVal) {
+                dimmerValue = dimVal;
+                analogWrite(DIMMER_PIN, map(dimmerValue, 0, 9, 0, 1023));
+                stateChanged = true;
+            }
+        }
+
+        // Sync web GUI immediately upon receiving peripheral status JSON
+        if (stateChanged || doc.containsKey("POWER1") || doc.containsKey("Dimmer")) {
+            broadcastState();
+        }
+    }
 }
 
 // --- Broadcast Helpers ---
@@ -363,14 +384,9 @@ void setup() {
 
     // Connect to WiFi
     WiFi.begin(ssid, password);
-    Serial.print("Connecting to WiFi");
     while (WiFi.status() != WL_CONNECTED) {
         delay(500);
-        Serial.print(".");
     }
-    Serial.println("\nWiFi connected.");
-    Serial.print("IP Address: ");
-    Serial.println(WiFi.localIP());
 
     // Setup Web Server routes
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
@@ -381,9 +397,14 @@ void setup() {
     server.addHandler(&ws);
 
     server.begin();
-    Serial.println("HTTP server started");
 }
 
 void loop() {
     ws.cleanupClients();
+
+    // Listen continuously for incoming JSON feedback lines over Serial from peripheral
+    while (Serial.available()) {
+        String line = Serial.readStringUntil('\n');
+        parseSerialFeedback(line);
+    }
 }
