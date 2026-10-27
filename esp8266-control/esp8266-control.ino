@@ -15,11 +15,16 @@ int dimmerValue = 0; // 0 to 9
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 
+// --- Serial Buffering State (50ms Silence Timeout) ---
+String serialBuffer = "";
+unsigned long lastCharTime = 0;
+const unsigned long SERIAL_TIMEOUT = 50; // Milliseconds of silence to detect end of transmission batch
+
 // Forward declarations
 void broadcastState();
 void broadcastLog(String message);
 void handleCommand(String cmd);
-void parseSerialFeedback(String line);
+void processBufferedSerial(String data);
 
 // --- HTML Template (Exact match to original UI) ---
 const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
@@ -350,43 +355,55 @@ void handleCommand(String cmd) {
     broadcastLog(">> STATUS");
 }
 
-// --- Parse Incoming Serial Status JSON from Peripheral ---
-void parseSerialFeedback(String line) {
-    line.trim();
-    if (line.length() == 0) return;
+// --- Pre-Buffer and Process Serial Batch at Transmission End (50ms Silence) ---
+void processBufferedSerial(String data) {
+    String bufferCopy = data;
+    bufferCopy.trim();
+    if (bufferCopy.length() == 0) return;
 
-    // Log raw incoming feedback to console
-    broadcastLog("<< " + line);
+    broadcastLog("<< [Batch Received]");
 
-    // Parse incoming JSON feedback (e.g. {"POWER1":"ON","POWER2":"OFF",...})
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, line);
-    if (!error) {
-        bool stateChanged = false;
+    bool stateChanged = false;
 
-        for (int i = 1; i <= 4; i++) {
-            String key = "POWER" + String(i);
-            if (doc.containsKey(key)) {
-                bool isOn = (doc[key].as<String>() == "ON");
-                if (relayStates[i - 1] != isOn) {
-                    relayStates[i - 1] = isOn;
-                    stateChanged = true;
+    // Split and parse multi-line payloads within the buffered batch window
+    int startIdx = 0;
+    while (startIdx < (int)bufferCopy.length()) {
+        int nextNewline = bufferCopy.indexOf('\n', startIdx);
+        if (nextNewline == -1) nextNewline = bufferCopy.length();
+
+        String line = bufferCopy.substring(startIdx, nextNewline);
+        line.trim();
+
+        if (line.length() > 0) {
+            JsonDocument doc;
+            DeserializationError error = deserializeJson(doc, line);
+            if (!error) {
+                for (int i = 1; i <= 4; i++) {
+                    String key = "POWER" + String(i);
+                    if (doc.containsKey(key)) {
+                        bool isOn = (doc[key].as<String>() == "ON");
+                        if (relayStates[i - 1] != isOn) {
+                            relayStates[i - 1] = isOn;
+                            stateChanged = true;
+                        }
+                    }
+                }
+
+                if (doc.containsKey("Dimmer")) {
+                    int dimVal = doc["Dimmer"].as<int>();
+                    if (dimmerValue != dimVal) {
+                        dimmerValue = dimVal;
+                        stateChanged = true;
+                    }
                 }
             }
         }
+        startIdx = nextNewline + 1;
+    }
 
-        if (doc.containsKey("Dimmer")) {
-            int dimVal = doc["Dimmer"].as<int>();
-            if (dimmerValue != dimVal) {
-                dimmerValue = dimVal;
-                stateChanged = true;
-            }
-        }
-
-        // Sync web GUI immediately upon receiving peripheral status JSON
-        if (stateChanged || doc.containsKey("POWER1") || doc.containsKey("Dimmer")) {
-            broadcastState();
-        }
+    // Update and broadcast state ONCE at the end of the transmission batch
+    if (stateChanged) {
+        broadcastState();
     }
 }
 
@@ -439,9 +456,20 @@ void setup() {
 void loop() {
     ws.cleanupClients();
 
-    // Listen continuously for incoming JSON feedback lines over Serial from peripheral
+    // Read incoming characters into a non-blocking pre-buffer
     while (Serial.available()) {
-        String line = Serial.readStringUntil('\n');
-        parseSerialFeedback(line);
+        char c = Serial.read();
+        lastCharTime = millis();
+        if (serialBuffer.length() < 512) {
+            serialBuffer += c;
+        } else {
+            serialBuffer = ""; // Overflow protection reset
+        }
+    }
+
+    // Detect end of transmission using 50ms silence timeout, then batch process all updates
+    if (serialBuffer.length() > 0 && (millis() - lastCharTime >= SERIAL_TIMEOUT)) {
+        processBufferedSerial(serialBuffer);
+        serialBuffer = "";
     }
 }
