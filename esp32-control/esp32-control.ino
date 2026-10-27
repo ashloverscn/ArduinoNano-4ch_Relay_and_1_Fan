@@ -1,0 +1,507 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <WebSocketsServer.h>
+#include <ArduinoJson.h>
+
+// --- WiFi Credentials ---
+const char* ssid = "ash_jio_2G";
+const char* password = "ThundersnO0w@,,#";
+
+// --- Controller State ---
+bool relayStates[4] = {false, false, false, false};
+int dimmerValue = 0; // 0 to 9
+
+// --- Modern Web Server & WebSocket Ports ---
+WebServer server(80);
+WebSocketsServer webSocket(81);
+
+// --- Serial Buffering State (50ms Silence Timeout) ---
+String serialBuffer = "";
+unsigned long lastCharTime = 0;
+const unsigned long SERIAL_TIMEOUT = 50; // Milliseconds of silence to detect end of message batch
+
+// Forward declarations
+void broadcastState();
+void broadcastLog(const String& message);
+void handleCommand(const String& cmd);
+void processBufferedSerial(const String& data);
+
+// --- HTML Template (Exact match to original UI) ---
+const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 Home Automation Web Controller</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f6f8;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+        }
+        .container {
+            width: 100%;
+            max-width: 650px;
+            background: #ffffff;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+        }
+        h2 { text-align: center; margin-top: 0; color: #333; }
+        .card {
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            padding: 15px;
+            margin-bottom: 15px;
+            background: #fafafa;
+        }
+        .card-title {
+            font-weight: bold;
+            margin-bottom: 10px;
+            color: #555;
+            font-size: 14px;
+            text-transform: uppercase;
+        }
+        .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        button {
+            padding: 10px 15px;
+            font-size: 14px;
+            border-radius: 4px;
+            border: none;
+            cursor: pointer;
+            background-color: #007bff;
+            color: white;
+            transition: 0.2s;
+        }
+        button:hover { background-color: #0056b3; }
+        
+        .relay-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+        .relay-btn {
+            height: 70px;
+            font-weight: bold;
+            background-color: #e0e0e0;
+            color: #000;
+            border-radius: 6px;
+        }
+        .relay-btn.on {
+            background-color: #4CAF50;
+            color: #fff;
+        }
+
+        #console {
+            width: 100%;
+            height: 150px;
+            background-color: #1e1e1e;
+            color: #00ff00;
+            font-family: monospace;
+            font-size: 12px;
+            padding: 10px;
+            box-sizing: border-box;
+            overflow-y: scroll;
+            border-radius: 4px;
+        }
+        .flex-fill { flex: 1; }
+        #connectionStatus { font-weight: bold; padding: 5px 10px; border-radius: 4px; display: inline-block; }
+        .status-disconnected { background: #ffebee; color: #c62828; }
+        .status-connected { background: #e8f5e9; color: #2e7d32; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>ESP32 Home Automation</h2>
+
+    <!-- Connection Status Banner -->
+    <div class="card">
+        <div class="card-title">ESP32 Status</div>
+        <div id="connectionStatus" class="status-disconnected">Status: Connecting...</div>
+    </div>
+
+    <!-- Relays Control -->
+    <div class="card">
+        <div class="card-title">Relay Controls</div>
+        <div class="relay-grid">
+            <button id="relay-1" class="relay-btn" onclick="toggleRelay(1)">Relay 1<br>OFF</button>
+            <button id="relay-2" class="relay-btn" onclick="toggleRelay(2)">Relay 2<br>OFF</button>
+            <button id="relay-3" class="relay-btn" onclick="toggleRelay(3)">Relay 3<br>OFF</button>
+            <button id="relay-4" class="relay-btn" onclick="toggleRelay(4)">Relay 4<br>OFF</button>
+        </div>
+    </div>
+
+    <!-- Dimmer Control -->
+    <div class="card">
+        <div class="card-title">Dimmer Control (0-9)</div>
+        <div class="row">
+            <button onclick="sendCommand('DIMMER 0')">MIN (0)</button>
+            <button onclick="sendCommand('DIMM_DN')">Step -</button>
+            <input type="range" id="dimmerSlider" class="flex-fill" min="0" max="9" value="0" onchange="onSliderChange(this.value)">
+            <button onclick="sendCommand('DIMM_UP')">Step +</button>
+            <button onclick="sendCommand('DIMMER 9')">MAX (9)</button>
+        </div>
+    </div>
+
+    <!-- Global & Utilities -->
+    <div class="card">
+        <div class="card-title">Global Commands & Status</div>
+        <div class="row">
+            <button class="flex-fill" onclick="sendCommand('ALL_ON')">ALL ON</button>
+            <button class="flex-fill" onclick="sendCommand('ALL_OFF')">ALL OFF</button>
+            <button class="flex-fill" onclick="sendCommand('STATUS')">Get Status</button>
+        </div>
+    </div>
+
+    <!-- Console Log -->
+    <div class="card">
+        <div class="card-title">Serial Console / Feedback</div>
+        <div id="console"></div>
+    </div>
+</div>
+
+<script>
+    let ws;
+    let relayStates = [false, false, false, false];
+
+    function initWebSocket() {
+        ws = new WebSocket('ws://' + window.location.hostname + ':81/');
+        
+        ws.onopen = function(event) {
+            updateConnectionBanner(true);
+            appendConsole("Connected to ESP32 WebSocket server.");
+            sendCommand('STATUS');
+        };
+        
+        ws.onclose = function(event) {
+            updateConnectionBanner(false);
+            appendConsole("Disconnected. Reconnecting in 2s...");
+            setTimeout(initWebSocket, 2000);
+        };
+        
+        ws.onmessage = function(event) {
+            try {
+                const data = JSON.parse(event.data);
+                if (data.type === 'console_log') {
+                    appendConsole(data.message);
+                } else if (data.type === 'state_update') {
+                    if (data.relays) {
+                        data.relays.forEach((state, i) => updateRelayUI(i + 1, state));
+                    }
+                    if (data.dimmer !== undefined) {
+                        document.getElementById('dimmerSlider').value = data.dimmer;
+                    }
+                }
+            } catch (e) {
+                appendConsole(event.data);
+            }
+        };
+    }
+
+    function updateConnectionBanner(connected) {
+        const banner = document.getElementById('connectionStatus');
+        if (connected) {
+            banner.innerText = "Status: Connected (ESP32 Direct)";
+            banner.className = "status-connected";
+        } else {
+            banner.innerText = "Status: Disconnected";
+            banner.className = "status-disconnected";
+        }
+    }
+
+    function toggleRelay(relayNum) {
+        const currentState = relayStates[relayNum - 1];
+        sendCommand(`POWER${relayNum} ${currentState ? 'OFF' : 'ON'}`);
+    }
+
+    function onSliderChange(val) {
+        sendCommand(`DIMMER ${val}`);
+    }
+
+    function sendCommand(cmd) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({command: cmd}));
+        }
+    }
+
+    function updateRelayUI(relayNum, isOn) {
+        relayStates[relayNum - 1] = isOn;
+        const btn = document.getElementById(`relay-${relayNum}`);
+        if (isOn) {
+            btn.innerText = `Relay ${relayNum}\nON`;
+            btn.classList.add('on');
+        } else {
+            btn.innerText = `Relay ${relayNum}\nOFF`;
+            btn.classList.remove('on');
+        }
+    }
+
+    function appendConsole(msg) {
+        const consoleEl = document.getElementById('console');
+        consoleEl.innerHTML += msg + '<br>';
+        consoleEl.scrollTop = consoleEl.scrollHeight;
+    }
+
+    window.onload = initWebSocket;
+</script>
+
+</body>
+</html>
+)rawliteral";
+
+// --- WebSocket Event Callback ---
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+    switch (type) {
+        case WStype_DISCONNECTED:
+            break;
+        case WStype_CONNECTED:
+            broadcastState();
+            break;
+        case WStype_TEXT: {
+            JsonDocument doc;
+            DeserializationError error = deserializeJson(doc, payload, length);
+            if (!error && doc.containsKey("command")) {
+                String cmd = doc["command"].as<String>();
+                handleCommand(cmd);
+            }
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+// --- Translate Web UI Actions and Append STATUS ---
+void handleCommand(const String& cmd) {
+    String trimmedCmd = cmd;
+    trimmedCmd.trim();
+
+    for (int i = 1; i <= 4; i++) {
+        if (trimmedCmd == "POWER" + String(i) + " ON") {
+            String jsonOut = "{\"POWER" + String(i) + "\":\"ON\"}";
+            Serial.println(jsonOut);
+            broadcastLog(">> " + jsonOut);
+            delay(10);
+            Serial.println("STATUS");
+            broadcastLog(">> STATUS");
+            return;
+        } else if (trimmedCmd == "POWER" + String(i) + " OFF") {
+            String jsonOut = "{\"POWER" + String(i) + "\":\"OFF\"}";
+            Serial.println(jsonOut);
+            broadcastLog(">> " + jsonOut);
+            delay(10);
+            Serial.println("STATUS");
+            broadcastLog(">> STATUS");
+            return;
+        }
+    }
+
+    if (trimmedCmd.startsWith("DIMMER ")) {
+        int val = trimmedCmd.substring(7).toInt();
+        String jsonOut = "{\"Dimmer\":" + String(val) + "}";
+        Serial.println(jsonOut);
+        broadcastLog(">> " + jsonOut);
+    } else if (trimmedCmd == "DIMM_UP") {
+        if (dimmerValue < 9) dimmerValue++;
+        String jsonOut = "{\"Dimmer\":" + String(dimmerValue) + "}";
+        Serial.println(jsonOut);
+        broadcastLog(">> " + jsonOut);
+    } else if (trimmedCmd == "DIMM_DN") {
+        if (dimmerValue > 0) dimmerValue--;
+        String jsonOut = "{\"Dimmer\":" + String(dimmerValue) + "}";
+        Serial.println(jsonOut);
+        broadcastLog(">> " + jsonOut);
+    } else if (trimmedCmd == "ALL_ON") {
+        for (int i = 1; i <= 4; i++) {
+            String jsonOut = "{\"POWER" + String(i) + "\":\"ON\"}";
+            Serial.println(jsonOut);
+            broadcastLog(">> " + jsonOut);
+            delay(20);
+            Serial.println("STATUS");
+            broadcastLog(">> STATUS");
+            delay(20);
+        }
+        dimmerValue = 9;
+        String dimOut = "{\"Dimmer\":9}";
+        Serial.println(dimOut);
+        broadcastLog(">> " + dimOut);
+        delay(20);
+        Serial.println("STATUS");
+        broadcastLog(">> STATUS");
+        return;
+    } else if (trimmedCmd == "ALL_OFF") {
+        for (int i = 1; i <= 4; i++) {
+            String jsonOut = "{\"POWER" + String(i) + "\":\"OFF\"}";
+            Serial.println(jsonOut);
+            broadcastLog(">> " + jsonOut);
+            delay(20);
+            Serial.println("STATUS");
+            broadcastLog(">> STATUS");
+            delay(20);
+        }
+        dimmerValue = 0;
+        String dimOut = "{\"Dimmer\":0}";
+        Serial.println(dimOut);
+        broadcastLog(">> " + dimOut);
+        delay(20);
+        Serial.println("STATUS");
+        broadcastLog(">> STATUS");
+        return;
+    } else if (trimmedCmd == "STATUS") {
+        Serial.println("STATUS");
+        broadcastLog(">> STATUS");
+        return;
+    }
+
+    delay(10);
+    Serial.println("STATUS");
+    broadcastLog(">> STATUS");
+}
+
+// --- Pre-Buffer and Process Serial Batch at Transmission End (50ms Silence) ---
+void processBufferedSerial(const String& data) {
+    String bufferCopy = data;
+    bufferCopy.trim();
+    if (bufferCopy.length() == 0) return;
+
+    broadcastLog("<< [Batch Received]");
+
+    bool stateChanged = false;
+
+    // Split and parse multi-line payloads within the buffered batch window
+    int startIdx = 0;
+    while (startIdx < (int)bufferCopy.length()) {
+        int nextNewline = bufferCopy.indexOf('\n', startIdx);
+        if (nextNewline == -1) nextNewline = bufferCopy.length();
+
+        String line = bufferCopy.substring(startIdx, nextNewline);
+        line.trim();
+
+        if (line.length() > 0) {
+            JsonDocument doc;
+            DeserializationError error = deserializeJson(doc, line);
+            if (!error) {
+                for (int i = 1; i <= 4; i++) {
+                    String key = "POWER" + String(i);
+                    if (doc.containsKey(key)) {
+                        bool isOn = (doc[key].as<String>() == "ON");
+                        if (relayStates[i - 1] != isOn) {
+                            relayStates[i - 1] = isOn;
+                            stateChanged = true;
+                        }
+                    }
+                }
+
+                if (doc.containsKey("Dimmer")) {
+                    int dimVal = doc["Dimmer"].as<int>();
+                    if (dimmerValue != dimVal) {
+                        dimmerValue = dimVal;
+                        stateChanged = true;
+                    }
+                }
+            }
+        }
+        startIdx = nextNewline + 1;
+    }
+
+    // Update and broadcast state ONCE at the end of the transmission batch
+    if (stateChanged) {
+        broadcastState();
+    }
+}
+
+// --- Broadcast Helpers ---
+void broadcastState() {
+    JsonDocument doc;
+    doc["type"] = "state_update";
+    JsonArray relays = doc["relays"].to<JsonArray>();
+    for (int i = 0; i < 4; i++) {
+        relays.add(relayStates[i]);
+    }
+    doc["dimmer"] = dimmerValue;
+
+    String output;
+    serializeJson(doc, output);
+    webSocket.broadcastTXT(output);
+}
+
+void broadcastLog(const String& message) {
+    JsonDocument doc;
+    doc["type"] = "console_log";
+    doc["message"] = message;
+
+    String output;
+    serializeJson(doc, output);
+    webSocket.broadcastTXT(output);
+}
+
+// --- Setup & Loop ---
+void setup() {
+    Serial.begin(115200);
+    delay(2000); // Give serial monitor time to catch logs and power rail to settle
+    
+    Serial.println("\n\n=================================");
+    Serial.println("[BOOT] ESP32-CAM Starting Up...");
+    Serial.println("=================================");
+
+    // Connect to WiFi with visible step logs
+    Serial.print("[WIFI] Connecting to SSID: ");
+    Serial.println(ssid);
+    
+    WiFi.begin(ssid, password);
+    
+    unsigned long startAttempt = millis();
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+        // Timeout after 15 seconds so it doesn't infinite loop silently if credentials fail
+        if (millis() - startAttempt > 15000) {
+            Serial.println("\n[WIFI ERROR] Failed to connect to WiFi! Continuing anyway...");
+            break;
+        }
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("\n[WIFI SUCCESS] Connected!");
+        Serial.print("[IP Address]: ");
+        Serial.println(WiFi.localIP());
+    }
+
+    // Start Web Server
+    Serial.println("[HTTP] Starting web server on port 80...");
+    server.on("/", HTTP_GET, []() {
+        server.send_P(200, "text/html", HTML_TEMPLATE);
+    });
+    server.begin();
+
+    // Start WebSocket Server
+    Serial.println("[WS] Starting WebSocket server on port 81...");
+    webSocket.begin();
+    webSocket.onEvent(webSocketEvent);
+
+    Serial.println("[BOOT COMPLETE] System ready.\n");
+}
+
+void loop() {
+    webSocket.loop();
+    server.handleClient();
+
+    // Read incoming characters into a non-blocking buffer
+    while (Serial.available()) {
+        char c = Serial.read();
+        lastCharTime = millis();
+        if (serialBuffer.length() < 512) {
+            serialBuffer += c;
+        } else {
+            serialBuffer = ""; // Reset on overflow protection
+        }
+    }
+
+    // Detect end of transmission: if buffer has content and no new characters arrive for 50ms
+    if (serialBuffer.length() > 0 && (millis() - lastCharTime >= SERIAL_TIMEOUT)) {
+        processBufferedSerial(serialBuffer);
+        serialBuffer = "";
+    }
+}
