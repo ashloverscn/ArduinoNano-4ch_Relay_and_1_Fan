@@ -5,8 +5,17 @@ import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 import serial
 import serial.tools.list_ports
+import paho.mqtt.client as mqtt
 
 CONFIG_FILE = "arduino_config.json"
+
+# --- MQTT Configuration ---
+MQTT_BROKER = "i11b0026.ala.eu-central-1.emqxsl.com"
+MQTT_PORT = 8883
+MQTT_USER = "admin"
+MQTT_PASS = "admin1234S"
+TOPIC_CMD = "home/esp8266/command"
+TOPIC_STATE = "home/esp8266/state"
 
 
 class ArduinoControllerApp:
@@ -29,6 +38,23 @@ class ArduinoControllerApp:
     self.create_widgets()
     self.refresh_ports()
     self.load_saved_settings()  # Pre-loads saved port/baud without auto-connecting
+
+    # --- Initialize MQTT Client ---
+    self.mqtt_client = mqtt.Client(
+        client_id="tkinter_controller",
+        callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+        protocol=mqtt.MQTTv5
+    )
+    self.mqtt_client.username_pw_set(username=MQTT_USER, password=MQTT_PASS)
+    self.mqtt_client.tls_set()
+    self.mqtt_client.on_connect = self.on_mqtt_connect
+    self.mqtt_client.on_message = self.on_mqtt_message
+
+    try:
+      self.mqtt_client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+      self.mqtt_client.loop_start()
+    except Exception as e:
+      self.log_message(f"MQTT Connection Error: {e}\n")
 
   def create_widgets(self):
     # --- CONNECTION FRAME ---
@@ -139,6 +165,23 @@ class ArduinoControllerApp:
     )
     self.console_log.pack(fill="both", expand=True)
 
+  # --- MQTT Callbacks ---
+  def on_mqtt_connect(self, client, userdata, flags, reason_code, properties=None):
+    if reason_code == 0:
+      self.log_message("Connected to EMQX MQTT Broker.\n")
+      client.subscribe(TOPIC_CMD)
+      client.subscribe(TOPIC_STATE)
+    else:
+      self.log_message(f"MQTT Connection failed with code {reason_code}\n")
+
+  def on_mqtt_message(self, client, userdata, msg):
+    try:
+      payload_str = msg.payload.decode("utf-8", errors="ignore")
+      # Parse incoming MQTT updates (commands or state syncs)
+      self.parse_arduino_feedback(payload_str)
+    except Exception as e:
+      pass
+
   def refresh_ports(self):
     ports = [port.device for port in serial.tools.list_ports.comports()]
     self.port_combo["values"] = ports
@@ -224,10 +267,16 @@ class ArduinoControllerApp:
     self.send_command(cmd)
 
   def send_command(self, cmd):
+    # --- Publish Command to MQTT Broker ---
+    try:
+      mqtt_payload = json.dumps({"command": cmd})
+      self.mqtt_client.publish(TOPIC_CMD, mqtt_payload)
+    except Exception as e:
+      print(f"MQTT Publish Error: {e}")
+
+    # --- Send over Serial if Connected ---
     if not self.is_connected or not self.ser or not self.ser.is_open:
-      messagebox.showwarning(
-          "Warning", "Not connected to any serial device!"
-      )
+      self.log_message(f">> {cmd} (MQTT Broadcast)\n")
       return
 
     try:
@@ -271,6 +320,19 @@ class ArduinoControllerApp:
         dim_val = data["Dimmer"]
         self.last_sent_dimmer = dim_val
         self.root.after(0, lambda v=dim_val: self.dimmer_slider.set(v))
+
+      # Also handle state_update format from Python/ESP8266 MQTT messages
+      if "type" in data and data["type"] == "state_update":
+        if "relays" in data:
+          for i, state in enumerate(data["relays"]):
+            self.relay_states[i] = state
+            self.root.after(
+                0, lambda idx=i, val=state: self.update_ui_relay(idx, val)
+            )
+        if "dimmer" in data:
+          dim_val = data["dimmer"]
+          self.last_sent_dimmer = dim_val
+          self.root.after(0, lambda v=dim_val: self.dimmer_slider.set(v))
     except json.JSONDecodeError:
       pass
 
