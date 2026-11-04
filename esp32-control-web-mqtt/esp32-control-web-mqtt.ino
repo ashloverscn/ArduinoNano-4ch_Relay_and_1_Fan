@@ -554,15 +554,39 @@ void handleCommand(const String& cmd) {
         Serial.println(jsonOut);
         logMessage(">> " + jsonOut);
     } else if (trimmedCmd == "ALL_ON") {
-        for (int i = 0; i < 4; i++) relayStates[i] = true;
+        for (int i = 0; i < 4; i++) {
+            relayStates[i] = true;
+            String jsonOut = "{\"POWER" + String(i + 1) + "\":\"ON\"}";
+            Serial.println(jsonOut);
+            logMessage(">> " + jsonOut);
+            delay(15);
+        }
         dimmerValue = 9;
-        Serial.println("{\"ALL\":\"ON\"}");
-        logMessage(">> {\"ALL\":\"ON\"}");
+        String dimOut = "{\"Dimmer\":9}";
+        Serial.println(dimOut);
+        logMessage(">> " + dimOut);
+        delay(15);
+        Serial.println("STATUS");
+        logMessage(">> STATUS");
+        broadcastState();
+        return;
     } else if (trimmedCmd == "ALL_OFF") {
-        for (int i = 0; i < 4; i++) relayStates[i] = false;
+        for (int i = 0; i < 4; i++) {
+            relayStates[i] = false;
+            String jsonOut = "{\"POWER" + String(i + 1) + "\":\"OFF\"}";
+            Serial.println(jsonOut);
+            logMessage(">> " + jsonOut);
+            delay(15);
+        }
         dimmerValue = 0;
-        Serial.println("{\"ALL\":\"OFF\"}");
-        logMessage(">> {\"ALL\":\"OFF\"}");
+        String dimOut = "{\"Dimmer\":0}";
+        Serial.println(dimOut);
+        logMessage(">> " + dimOut);
+        delay(15);
+        Serial.println("STATUS");
+        logMessage(">> STATUS");
+        broadcastState();
+        return;
     } else if (trimmedCmd == "STATUS") {
         Serial.println("STATUS");
         logMessage(">> STATUS");
