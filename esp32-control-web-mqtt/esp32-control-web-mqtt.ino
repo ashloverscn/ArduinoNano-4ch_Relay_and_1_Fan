@@ -431,10 +431,6 @@ void saveConfig(String srv, int prt, String usr, String pwd, String tCmd, String
 // --- Verbose Console Logger ---
 void logMessage(const String& msg) {
     Serial.println(msg);
-    if (consoleLogBuffer.length() > 2000) {
-        consoleLogBuffer = consoleLogBuffer.substring(consoleLogBuffer.length() - 1500);
-    }
-    consoleLogBuffer += msg + "\n";
     broadcastLog(msg);
 }
 
@@ -468,7 +464,7 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length) {
     }
     message.trim();
     
-    logMessage("<< [MQTT Sync] " + message);
+    logMessage("<< [MQTT State Sync]");
 
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, message);
@@ -500,14 +496,9 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length) {
 // --- Reconnect MQTT ---
 void reconnectMQTT() {
     if (!mqttClient.connected()) {
-        logMessage("Connecting to MQTT Broker " + mqtt_server + ":" + String(mqtt_port) + "...");
         String clientId = "ESP32Gateway-" + String((uint32_t)ESP.getEfuseMac(), HEX);
         if (mqttClient.connect(clientId.c_str(), mqtt_user.c_str(), mqtt_pass.c_str())) {
-            logMessage("Connected to EMQX Broker successfully!");
             mqttClient.subscribe(mqtt_topic_state.c_str());
-            logMessage("Subscribed to state topic: " + mqtt_topic_state);
-        } else {
-            logMessage("MQTT connection failed, rc=" + String(mqttClient.state()) + ". Retrying in 5s...");
         }
     }
 }
@@ -516,15 +507,12 @@ void reconnectMQTT() {
 void handleCommand(const String& cmd) {
     String trimmedCmd = cmd;
     trimmedCmd.trim();
-    logMessage("Processing command: " + trimmedCmd);
 
-    // Publish command to MQTT broker so Python slave/other nodes pick it up
     JsonDocument cmdDoc;
     cmdDoc["command"] = trimmedCmd;
     String pubPayload;
     serializeJson(cmdDoc, pubPayload);
     mqttClient.publish(mqtt_topic_cmd.c_str(), pubPayload.c_str());
-    logMessage("Published to MQTT [" + mqtt_topic_cmd + "]: " + pubPayload);
 
     for (int i = 1; i <= 4; i++) {
         if (trimmedCmd == "POWER" + String(i) + " ON") {
@@ -594,7 +582,7 @@ void processBufferedSerial(const String& data) {
     bufferCopy.trim();
     if (bufferCopy.length() == 0) return;
 
-    logMessage("<< [Serial Batch Received (" + String(bufferCopy.length()) + " bytes)]");
+    logMessage("<< [Batch Received]");
 
     bool stateChanged = false;
 
@@ -607,7 +595,6 @@ void processBufferedSerial(const String& data) {
         line.trim();
 
         if (line.length() > 0) {
-            logMessage("   Line: " + line);
             if (line.startsWith("POWER") || line.startsWith("DIMMER") || line == "DIMM_UP" || line == "DIMM_DN" || line == "ALL_ON" || line == "ALL_OFF" || line == "STATUS") {
                 handleCommand(line);
             } 
@@ -676,32 +663,20 @@ void broadcastLog(const String& message) {
 // --- Setup & Loop ---
 void setup() {
     Serial.begin(115200);
-    delay(2000);
-    
-    Serial.println("\n\n=================================");
-    Serial.println("[BOOT] ESP32 Starting Up...");
-    Serial.println("=================================");
+    delay(1000);
 
     // 1. Load Stored MQTT Configurations
     loadConfig();
 
     // 2. WiFi Connect with fallback credentials
-    logMessage("[WIFI] Connecting to SSID: " + String(DEFAULT_SSID));
     WiFi.begin(DEFAULT_SSID, DEFAULT_PASSWORD);
     
     unsigned long startAttempt = millis();
     while (WiFi.status() != WL_CONNECTED) {
         delay(500);
-        Serial.print(".");
         if (millis() - startAttempt > 15000) {
-            logMessage("\n[WIFI ERROR] Failed to connect to WiFi! Continuing...");
             break;
         }
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-        logMessage("\n[WIFI SUCCESS] Connected!");
-        logMessage("[IP Address]: " + WiFi.localIP().toString());
     }
 
     // 3. Configure Secure MQTT Client
@@ -741,7 +716,6 @@ void setup() {
         String tState = server.hasArg("mqtt_topic_state") ? server.arg("mqtt_topic_state") : DEFAULT_MQTT_TOPIC_STATE;
 
         saveConfig(srv, prt, usr, pwd, tCmd, tState);
-        logMessage("New MQTT settings saved! Rebooting...");
 
         server.send(200, "text/html", "<h3>Settings Saved! Restarting ESP32...</h3><script>setTimeout(()=>{window.location='/'}, 4000);</script>");
         delay(1000);
@@ -753,8 +727,6 @@ void setup() {
     // 5. Start WebSocket Server
     webSocket.begin();
     webSocket.onEvent(webSocketEvent);
-
-    logMessage("[BOOT COMPLETE] System ready.\n");
 }
 
 void loop() {
