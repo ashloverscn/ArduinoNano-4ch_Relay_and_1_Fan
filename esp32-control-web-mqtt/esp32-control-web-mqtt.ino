@@ -5,18 +5,28 @@
 #include <ArduinoJson.h>
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
+#include <Preferences.h>
 
-// --- WiFi Credentials ---
-const char* ssid = "ash_jio_2G";
-const char* password = "ThundersnO0w@,,#";
+Preferences preferences;
 
-// --- MQTT Broker Credentials & Configuration ---
-const char* mqtt_server = "i11b0026.ala.eu-central-1.emqxsl.com";
-const int mqtt_port = 8883;
-const char* mqtt_user = "admin";
-const char* mqtt_pass = "admin1234S";
-const char* mqtt_topic_cmd = "home/esp8266/command";
-const char* mqtt_topic_state = "home/esp8266/state";
+// --- Default Fallback Credentials (Pre-filled on first boot) ---
+const char* DEFAULT_SSID = "ash_jio_2G";
+const char* DEFAULT_PASSWORD = "ThundersnO0w@,,#";
+
+const char* DEFAULT_MQTT_SERVER = "i11b0026.ala.eu-central-1.emqxsl.com";
+const int   DEFAULT_MQTT_PORT = 8883;
+const char* DEFAULT_MQTT_USER = "admin";
+const char* DEFAULT_MQTT_PASS = "admin1234S";
+const char* DEFAULT_MQTT_TOPIC_CMD = "home/esp8266/command";
+const char* DEFAULT_MQTT_TOPIC_STATE = "home/esp8266/state";
+
+// --- Runtime Configuration Variables ---
+String mqtt_server;
+int mqtt_port;
+String mqtt_user;
+String mqtt_pass;
+String mqtt_topic_cmd;
+String mqtt_topic_state;
 
 // --- Controller State ---
 bool relayStates[4] = {false, false, false, false};
@@ -31,17 +41,23 @@ PubSubClient mqttClient(espClient);
 // --- Serial Buffering State (50ms Silence Timeout) ---
 String serialBuffer = "";
 unsigned long lastCharTime = 0;
-const unsigned long SERIAL_TIMEOUT = 50; // Milliseconds of silence to detect end of message batch
+const unsigned long SERIAL_TIMEOUT = 50;
+
+// Verbose log queue for web feedback console
+String consoleLogBuffer = "";
 
 // Forward declarations
+void loadConfig();
+void saveConfig(String srv, int prt, String usr, String pwd, String tCmd, String tState);
 void broadcastState();
 void broadcastLog(const String& message);
+void logMessage(const String& msg);
 void handleCommand(const String& cmd);
 void processBufferedSerial(const String& data);
 void reconnectMQTT();
 void callbackMQTT(char* topic, byte* payload, unsigned int length);
 
-// --- HTML Template (Exact match to original UI) ---
+// --- HTML Template (Exact match + Top-Right Config Link & Verbose Console) ---
 const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="en">
@@ -65,7 +81,22 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
             border-radius: 8px;
             padding: 20px;
             box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+            position: relative;
         }
+        .config-link {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            text-decoration: none;
+            background-color: #6c757d;
+            color: white;
+            padding: 8px 12px;
+            font-size: 13px;
+            border-radius: 4px;
+            font-weight: bold;
+            transition: 0.2s;
+        }
+        .config-link:hover { background-color: #5a6268; }
         h2 { text-align: center; margin-top: 0; color: #333; }
         .card {
             border: 1px solid #ddd;
@@ -118,6 +149,7 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
             box-sizing: border-box;
             overflow-y: scroll;
             border-radius: 4px;
+            white-space: pre-wrap;
         }
         .flex-fill { flex: 1; }
         #connectionStatus { font-weight: bold; padding: 5px 10px; border-radius: 4px; display: inline-block; }
@@ -128,6 +160,7 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
 <body>
 
 <div class="container">
+    <a href="/config" class="config-link">⚙️ Config</a>
     <h2>ESP32 Home Automation</h2>
 
     <!-- Connection Status Banner -->
@@ -254,7 +287,7 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
 
     function appendConsole(msg) {
         const consoleEl = document.getElementById('console');
-        consoleEl.innerHTML += msg + '<br>';
+        consoleEl.innerHTML += msg + '\n';
         consoleEl.scrollTop = consoleEl.scrollHeight;
     }
 
@@ -264,6 +297,146 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
 </body>
 </html>
 )rawliteral";
+
+// --- Dedicated MQTT Configuration Page HTML ---
+const char CONFIG_PAGE[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQTT Configuration</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f6f8;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+        }
+        .container {
+            width: 100%;
+            max-width: 500px;
+            background: #ffffff;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+        }
+        h2 { text-align: center; margin-top: 0; color: #333; }
+        .back-link {
+            display: inline-block;
+            margin-bottom: 15px;
+            text-decoration: none;
+            color: #007bff;
+            font-weight: bold;
+            font-size: 14px;
+        }
+        .back-link:hover { text-decoration: underline; }
+        label { font-weight: bold; font-size: 13px; color: #555; display: block; margin-top: 10px; }
+        input[type="text"], input[type="password"], input[type="number"] {
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            width: 100%;
+            box-sizing: border-box;
+            margin-top: 5px;
+            margin-bottom: 5px;
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            font-size: 15px;
+            border-radius: 4px;
+            border: none;
+            cursor: pointer;
+            background-color: #28a745;
+            color: white;
+            font-weight: bold;
+            margin-top: 15px;
+            transition: 0.2s;
+        }
+        button:hover { background-color: #218838; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <a href="/" class="back-link">&larr; Back to Dashboard</a>
+    <h2>MQTT Configuration</h2>
+    
+    <form action="/save-settings" method="POST">
+        <label>MQTT Server:</label>
+        <input type="text" name="mqtt_server" id="cfg_server">
+        
+        <label>MQTT Port:</label>
+        <input type="number" name="mqtt_port" id="cfg_port">
+        
+        <label>MQTT Username:</label>
+        <input type="text" name="mqtt_user" id="cfg_user">
+        
+        <label>MQTT Password:</label>
+        <input type="password" name="mqtt_pass" id="cfg_pass">
+        
+        <label>Command Topic:</label>
+        <input type="text" name="mqtt_topic_cmd" id="cfg_tcmd">
+        
+        <label>State Topic:</label>
+        <input type="text" name="mqtt_topic_state" id="cfg_tstate">
+        
+        <button type="submit">Save & Reboot</button>
+    </form>
+</div>
+
+<script>
+    fetch('/get-config')
+        .then(res => res.json())
+        .then(data => {
+            document.getElementById('cfg_server').value = data.server;
+            document.getElementById('cfg_port').value = data.port;
+            document.getElementById('cfg_user').value = data.user;
+            document.getElementById('cfg_pass').value = data.pass;
+            document.getElementById('cfg_tcmd').value = data.tcmd;
+            document.getElementById('cfg_tstate').value = data.tstate;
+        });
+</script>
+
+</body>
+</html>
+)rawliteral";
+
+// --- Load and Save Configurations via Preferences ---
+void loadConfig() {
+    preferences.begin("config", false);
+    mqtt_server = preferences.getString("server", DEFAULT_MQTT_SERVER);
+    mqtt_port = preferences.getInt("port", DEFAULT_MQTT_PORT);
+    mqtt_user = preferences.getString("user", DEFAULT_MQTT_USER);
+    mqtt_pass = preferences.getString("pass", DEFAULT_MQTT_PASS);
+    mqtt_topic_cmd = preferences.getString("tcmd", DEFAULT_MQTT_TOPIC_CMD);
+    mqtt_topic_state = preferences.getString("tstate", DEFAULT_MQTT_TOPIC_STATE);
+    preferences.end();
+}
+
+void saveConfig(String srv, int prt, String usr, String pwd, String tCmd, String tState) {
+    preferences.begin("config", false);
+    preferences.putString("server", srv);
+    preferences.putInt("port", prt);
+    preferences.putString("user", usr);
+    preferences.putString("pass", pwd);
+    preferences.putString("tcmd", tCmd);
+    preferences.putString("tstate", tState);
+    preferences.end();
+}
+
+// --- Verbose Console Logger ---
+void logMessage(const String& msg) {
+    Serial.println(msg);
+    if (consoleLogBuffer.length() > 2000) {
+        consoleLogBuffer = consoleLogBuffer.substring(consoleLogBuffer.length() - 1500);
+    }
+    consoleLogBuffer += msg + "\n";
+    broadcastLog(msg);
+}
 
 // --- WebSocket Event Callback ---
 void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
@@ -295,6 +468,8 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length) {
     }
     message.trim();
     
+    logMessage("<< [MQTT Sync] " + message);
+
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, message);
     if (!error && doc["type"] == "state_update") {
@@ -319,17 +494,20 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length) {
         if (changed) {
             broadcastState();
         }
-        broadcastLog("<< [MQTT State Sync]");
     }
 }
 
 // --- Reconnect MQTT ---
 void reconnectMQTT() {
     if (!mqttClient.connected()) {
+        logMessage("Connecting to MQTT Broker " + mqtt_server + ":" + String(mqtt_port) + "...");
         String clientId = "ESP32Gateway-" + String((uint32_t)ESP.getEfuseMac(), HEX);
-        if (mqttClient.connect(clientId.c_str(), mqtt_user, mqtt_pass)) {
-            broadcastLog("Connected to EMQX Broker!");
-            mqttClient.subscribe(mqtt_topic_state);
+        if (mqttClient.connect(clientId.c_str(), mqtt_user.c_str(), mqtt_pass.c_str())) {
+            logMessage("Connected to EMQX Broker successfully!");
+            mqttClient.subscribe(mqtt_topic_state.c_str());
+            logMessage("Subscribed to state topic: " + mqtt_topic_state);
+        } else {
+            logMessage("MQTT connection failed, rc=" + String(mqttClient.state()) + ". Retrying in 5s...");
         }
     }
 }
@@ -338,94 +516,76 @@ void reconnectMQTT() {
 void handleCommand(const String& cmd) {
     String trimmedCmd = cmd;
     trimmedCmd.trim();
+    logMessage("Processing command: " + trimmedCmd);
 
     // Publish command to MQTT broker so Python slave/other nodes pick it up
     JsonDocument cmdDoc;
     cmdDoc["command"] = trimmedCmd;
     String pubPayload;
     serializeJson(cmdDoc, pubPayload);
-    mqttClient.publish(mqtt_topic_cmd, pubPayload.c_str());
+    mqttClient.publish(mqtt_topic_cmd.c_str(), pubPayload.c_str());
+    logMessage("Published to MQTT [" + mqtt_topic_cmd + "]: " + pubPayload);
 
     for (int i = 1; i <= 4; i++) {
         if (trimmedCmd == "POWER" + String(i) + " ON") {
+            relayStates[i - 1] = true;
             String jsonOut = "{\"POWER" + String(i) + "\":\"ON\"}";
             Serial.println(jsonOut);
-            broadcastLog(">> " + jsonOut);
+            logMessage(">> " + jsonOut);
             delay(10);
             Serial.println("STATUS");
-            broadcastLog(">> STATUS");
+            logMessage(">> STATUS");
+            broadcastState();
             return;
         } else if (trimmedCmd == "POWER" + String(i) + " OFF") {
+            relayStates[i - 1] = false;
             String jsonOut = "{\"POWER" + String(i) + "\":\"OFF\"}";
             Serial.println(jsonOut);
-            broadcastLog(">> " + jsonOut);
+            logMessage(">> " + jsonOut);
             delay(10);
             Serial.println("STATUS");
-            broadcastLog(">> STATUS");
+            logMessage(">> STATUS");
+            broadcastState();
             return;
         }
     }
 
     if (trimmedCmd.startsWith("DIMMER ")) {
-        int val = trimmedCmd.substring(7).toInt();
-        String jsonOut = "{\"Dimmer\":" + String(val) + "}";
+        dimmerValue = trimmedCmd.substring(7).toInt();
+        String jsonOut = "{\"Dimmer\":" + String(dimmerValue) + "}";
         Serial.println(jsonOut);
-        broadcastLog(">> " + jsonOut);
+        logMessage(">> " + jsonOut);
     } else if (trimmedCmd == "DIMM_UP") {
         if (dimmerValue < 9) dimmerValue++;
         String jsonOut = "{\"Dimmer\":" + String(dimmerValue) + "}";
         Serial.println(jsonOut);
-        broadcastLog(">> " + jsonOut);
+        logMessage(">> " + jsonOut);
     } else if (trimmedCmd == "DIMM_DN") {
         if (dimmerValue > 0) dimmerValue--;
         String jsonOut = "{\"Dimmer\":" + String(dimmerValue) + "}";
         Serial.println(jsonOut);
-        broadcastLog(">> " + jsonOut);
+        logMessage(">> " + jsonOut);
     } else if (trimmedCmd == "ALL_ON") {
-        for (int i = 1; i <= 4; i++) {
-            String jsonOut = "{\"POWER" + String(i) + "\":\"ON\"}";
-            Serial.println(jsonOut);
-            broadcastLog(">> " + jsonOut);
-            delay(20);
-            Serial.println("STATUS");
-            broadcastLog(">> STATUS");
-            delay(20);
-        }
+        for (int i = 0; i < 4; i++) relayStates[i] = true;
         dimmerValue = 9;
-        String dimOut = "{\"Dimmer\":9}";
-        Serial.println(dimOut);
-        broadcastLog(">> " + dimOut);
-        delay(20);
-        Serial.println("STATUS");
-        broadcastLog(">> STATUS");
-        return;
+        Serial.println("{\"ALL\":\"ON\"}");
+        logMessage(">> {\"ALL\":\"ON\"}");
     } else if (trimmedCmd == "ALL_OFF") {
-        for (int i = 1; i <= 4; i++) {
-            String jsonOut = "{\"POWER" + String(i) + "\":\"OFF\"}";
-            Serial.println(jsonOut);
-            broadcastLog(">> " + jsonOut);
-            delay(20);
-            Serial.println("STATUS");
-            broadcastLog(">> STATUS");
-            delay(20);
-        }
+        for (int i = 0; i < 4; i++) relayStates[i] = false;
         dimmerValue = 0;
-        String dimOut = "{\"Dimmer\":0}";
-        Serial.println(dimOut);
-        broadcastLog(">> " + dimOut);
-        delay(20);
-        Serial.println("STATUS");
-        broadcastLog(">> STATUS");
-        return;
+        Serial.println("{\"ALL\":\"OFF\"}");
+        logMessage(">> {\"ALL\":\"OFF\"}");
     } else if (trimmedCmd == "STATUS") {
         Serial.println("STATUS");
-        broadcastLog(">> STATUS");
+        logMessage(">> STATUS");
+        broadcastState();
         return;
     }
 
+    broadcastState();
     delay(10);
     Serial.println("STATUS");
-    broadcastLog(">> STATUS");
+    logMessage(">> STATUS");
 }
 
 // --- Pre-Buffer and Process Serial Batch at Transmission End (50ms Silence) ---
@@ -434,7 +594,7 @@ void processBufferedSerial(const String& data) {
     bufferCopy.trim();
     if (bufferCopy.length() == 0) return;
 
-    broadcastLog("<< [Batch Received]");
+    logMessage("<< [Serial Batch Received (" + String(bufferCopy.length()) + " bytes)]");
 
     bool stateChanged = false;
 
@@ -447,15 +607,11 @@ void processBufferedSerial(const String& data) {
         line.trim();
 
         if (line.length() > 0) {
-            // Check if this line is an incoming command from Serial (e.g. POWER1 ON, DIMMER 5, ALL_ON, STATUS)
+            logMessage("   Line: " + line);
             if (line.startsWith("POWER") || line.startsWith("DIMMER") || line == "DIMM_UP" || line == "DIMM_DN" || line == "ALL_ON" || line == "ALL_OFF" || line == "STATUS") {
-                broadcastLog("<< [Serial Cmd] " + line);
-                
-                // Execute command locally and mirror out to MQTT/WebSockets via handleCommand
                 handleCommand(line);
             } 
             else {
-                // Otherwise, treat as incoming state telemetry JSON feedback from a slave device
                 JsonDocument doc;
                 DeserializationError error = deserializeJson(doc, line);
                 if (!error) {
@@ -502,9 +658,8 @@ void broadcastState() {
     serializeJson(doc, output);
     webSocket.broadcastTXT(output);
 
-    // Also publish state update over MQTT
     if (mqttClient.connected()) {
-        mqttClient.publish(mqtt_topic_state, output.c_str());
+        mqttClient.publish(mqtt_topic_state.c_str(), output.c_str());
     }
 }
 
@@ -527,46 +682,79 @@ void setup() {
     Serial.println("[BOOT] ESP32 Starting Up...");
     Serial.println("=================================");
 
-    Serial.print("[WIFI] Connecting to SSID: ");
-    Serial.println(ssid);
-    
-    WiFi.begin(ssid, password);
+    // 1. Load Stored MQTT Configurations
+    loadConfig();
+
+    // 2. WiFi Connect with fallback credentials
+    logMessage("[WIFI] Connecting to SSID: " + String(DEFAULT_SSID));
+    WiFi.begin(DEFAULT_SSID, DEFAULT_PASSWORD);
     
     unsigned long startAttempt = millis();
     while (WiFi.status() != WL_CONNECTED) {
         delay(500);
         Serial.print(".");
         if (millis() - startAttempt > 15000) {
-            Serial.println("\n[WIFI ERROR] Failed to connect to WiFi! Continuing anyway...");
+            logMessage("\n[WIFI ERROR] Failed to connect to WiFi! Continuing...");
             break;
         }
     }
 
     if (WiFi.status() == WL_CONNECTED) {
-        Serial.println("\n[WIFI SUCCESS] Connected!");
-        Serial.print("[IP Address]: ");
-        Serial.println(WiFi.localIP());
+        logMessage("\n[WIFI SUCCESS] Connected!");
+        logMessage("[IP Address]: " + WiFi.localIP().toString());
     }
 
-    // Configure Secure MQTT Client
+    // 3. Configure Secure MQTT Client
     espClient.setInsecure();
-    mqttClient.setServer(mqtt_server, mqtt_port);
+    mqttClient.setServer(mqtt_server.c_str(), mqtt_port);
     mqttClient.setCallback(callbackMQTT);
     mqttClient.setBufferSize(512);
 
-    // Start Web Server
-    Serial.println("[HTTP] Starting web server on port 80...");
+    // 4. Setup Web Server Routes
     server.on("/", HTTP_GET, []() {
         server.send_P(200, "text/html", HTML_TEMPLATE);
     });
+
+    server.on("/config", HTTP_GET, []() {
+        server.send_P(200, "text/html", CONFIG_PAGE);
+    });
+
+    server.on("/get-config", HTTP_GET, []() {
+        JsonDocument doc;
+        doc["server"] = mqtt_server;
+        doc["port"] = mqtt_port;
+        doc["user"] = mqtt_user;
+        doc["pass"] = mqtt_pass;
+        doc["tcmd"] = mqtt_topic_cmd;
+        doc["tstate"] = mqtt_topic_state;
+        String response;
+        serializeJson(doc, response);
+        server.send(200, "application/json", response);
+    });
+
+    server.on("/save-settings", HTTP_POST, []() {
+        String srv = server.hasArg("mqtt_server") ? server.arg("mqtt_server") : DEFAULT_MQTT_SERVER;
+        int prt = server.hasArg("mqtt_port") ? server.arg("mqtt_port").toInt() : DEFAULT_MQTT_PORT;
+        String usr = server.hasArg("mqtt_user") ? server.arg("mqtt_user") : DEFAULT_MQTT_USER;
+        String pwd = server.hasArg("mqtt_pass") ? server.arg("mqtt_pass") : DEFAULT_MQTT_PASS;
+        String tCmd = server.hasArg("mqtt_topic_cmd") ? server.arg("mqtt_topic_cmd") : DEFAULT_MQTT_TOPIC_CMD;
+        String tState = server.hasArg("mqtt_topic_state") ? server.arg("mqtt_topic_state") : DEFAULT_MQTT_TOPIC_STATE;
+
+        saveConfig(srv, prt, usr, pwd, tCmd, tState);
+        logMessage("New MQTT settings saved! Rebooting...");
+
+        server.send(200, "text/html", "<h3>Settings Saved! Restarting ESP32...</h3><script>setTimeout(()=>{window.location='/'}, 4000);</script>");
+        delay(1000);
+        ESP.restart();
+    });
+
     server.begin();
 
-    // Start WebSocket Server
-    Serial.println("[WS] Starting WebSocket server on port 81...");
+    // 5. Start WebSocket Server
     webSocket.begin();
     webSocket.onEvent(webSocketEvent);
 
-    Serial.println("[BOOT COMPLETE] System ready.\n");
+    logMessage("[BOOT COMPLETE] System ready.\n");
 }
 
 void loop() {
