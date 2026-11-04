@@ -43,7 +43,7 @@ class ArduinoControllerApp:
     self.mqtt_client = mqtt.Client(
         client_id="tkinter_controller",
         callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
-        protocol=mqtt.MQTTv5
+        protocol=mqtt.MQTTv5,
     )
     self.mqtt_client.username_pw_set(username=MQTT_USER, password=MQTT_PASS)
     self.mqtt_client.tls_set()
@@ -166,7 +166,9 @@ class ArduinoControllerApp:
     self.console_log.pack(fill="both", expand=True)
 
   # --- MQTT Callbacks ---
-  def on_mqtt_connect(self, client, userdata, flags, reason_code, properties=None):
+  def on_mqtt_connect(
+      self, client, userdata, flags, reason_code, properties=None
+  ):
     if reason_code == 0:
       self.log_message("Connected to EMQX MQTT Broker.\n")
       client.subscribe(TOPIC_CMD)
@@ -267,24 +269,23 @@ class ArduinoControllerApp:
     self.send_command(cmd)
 
   def send_command(self, cmd):
-    # --- Publish Command to MQTT Broker ---
-    try:
-      mqtt_payload = json.dumps({"command": cmd})
-      self.mqtt_client.publish(TOPIC_CMD, mqtt_payload)
-    except Exception as e:
-      print(f"MQTT Publish Error: {e}")
-
-    # --- Send over Serial if Connected ---
-    if not self.is_connected or not self.ser or not self.ser.is_open:
-      self.log_message(f">> {cmd} (MQTT Broadcast)\n")
-      return
-
-    try:
-      full_cmd = cmd + "\n"
-      self.ser.write(full_cmd.encode("utf-8"))
-      self.log_message(f">> {cmd}\n")
-    except Exception as e:
-      messagebox.showerror("Serial Write Error", str(e))
+    # --- PREFERENCE CHECK: Serial First if Connected ---
+    if self.is_connected and self.ser and self.ser.is_open:
+      try:
+        full_cmd = cmd + "\n"
+        self.ser.write(full_cmd.encode("utf-8"))
+        self.log_message(f">> {cmd} (Serial)\n")
+      except Exception as e:
+        messagebox.showerror("Serial Write Error", str(e))
+    else:
+      # --- FALLBACK: Use MQTT if Serial is Disconnected ---
+      try:
+        mqtt_payload = json.dumps({"command": cmd})
+        self.mqtt_client.publish(TOPIC_CMD, mqtt_payload)
+        self.log_message(f">> {cmd} (MQTT Broadcast)\n")
+      except Exception as e:
+        print(f"MQTT Publish Error: {e}")
+        self.log_message(f">> {cmd} (Failed - No Connection)\n")
 
   def on_slider_release(self, event):
     val_int = int(round(self.dimmer_slider.get()))
