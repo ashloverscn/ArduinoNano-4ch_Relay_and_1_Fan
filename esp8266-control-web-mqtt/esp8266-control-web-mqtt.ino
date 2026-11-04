@@ -56,7 +56,7 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length);
 String getStateJson(String logMsg = "");
 void logMessage(String msg);
 
-// --- Main Dashboard HTML Template (Includes Verbose Console & Config Link) ---
+// --- Main Dashboard HTML Template ---
 const char MAIN_PAGE[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="en">
@@ -261,6 +261,8 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     }
 
     window.onload = function() {
+        appendConsole("Connected to ESP8266 WebSocket server.");
+        sendAction('STATUS');
         pollState();
         setInterval(pollState, 2000);
     };
@@ -417,7 +419,7 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length) {
     }
     message.trim();
     
-    logMessage("<< [MQTT Sync] " + message);
+    logMessage("<< [MQTT State Sync]");
 
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, message);
@@ -437,14 +439,9 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length) {
 // --- MQTT Reconnect ---
 void reconnectMQTT() {
     if (!mqttClient.connected()) {
-        logMessage("Connecting to MQTT Broker " + mqtt_server + ":" + String(mqtt_port) + "...");
         String clientId = "ESP8266Client-" + String(ESP.getChipId());
         if (mqttClient.connect(clientId.c_str(), mqtt_user.c_str(), mqtt_pass.c_str())) {
-            logMessage("Connected to EMQX Broker successfully!");
             mqttClient.subscribe(mqtt_topic_state.c_str());
-            logMessage("Subscribed to state topic: " + mqtt_topic_state);
-        } else {
-            logMessage("MQTT connection failed, rc=" + String(mqttClient.state()) + ". Retrying in 5s...");
         }
     }
 }
@@ -474,14 +471,12 @@ String getStateJson(String logMsg) {
 // --- Translate Web UI Actions ---
 void handleCommand(String cmd) {
     cmd.trim();
-    logMessage("Processing command: " + cmd);
 
     JsonDocument cmdDoc;
     cmdDoc["command"] = cmd;
     String cmdPayload;
     serializeJson(cmdDoc, cmdPayload);
     mqttClient.publish(mqtt_topic_cmd.c_str(), cmdPayload.c_str());
-    logMessage("Published to MQTT [" + mqtt_topic_cmd + "]: " + cmdPayload);
 
     for (int i = 1; i <= 4; i++) {
         if (cmd == "POWER" + String(i) + " ON") {
@@ -542,7 +537,7 @@ void processBufferedSerial(String data) {
     bufferCopy.trim();
     if (bufferCopy.length() == 0) return;
 
-    logMessage("<< [Serial Batch Received (" + String(bufferCopy.length()) + " bytes)]");
+    logMessage("<< [Batch Received]");
 
     int startIdx = 0;
     while (startIdx < (int)bufferCopy.length()) {
@@ -553,7 +548,6 @@ void processBufferedSerial(String data) {
         line.trim();
 
         if (line.length() > 0) {
-            logMessage("   Line: " + line);
             JsonDocument doc;
             DeserializationError error = deserializeJson(doc, line);
             if (!error) {
@@ -576,29 +570,22 @@ void processBufferedSerial(String data) {
 void setup() {
     Serial.begin(115200);
     delay(1000);
-    logMessage("\nBooting ESP8266 Home Automation Controller...");
 
     // 1. Load Stored MQTT Configurations
     loadConfig();
-    logMessage("Loaded MQTT Config: Server=" + mqtt_server + ", Port=" + String(mqtt_port));
 
     // 2. WiFiManager Configuration Portal Setup (Passwordless Open AP)
     WiFiManager wm;
     
     wm.setAPCallback([](WiFiManager *myWiFiManager) {
-        logMessage("Entered AP Mode (Captive Portal active)");
-        logMessage("Connect to SSID: " + String(myWiFiManager->getConfigPortalSSID()));
+        // Silent AP callback
     });
 
-    logMessage("Attempting Wi-Fi auto-connection...");
     bool res = wm.autoConnect("ESP8266-ConfigPortal");
     if(!res) {
-        logMessage("Failed to connect or hit timeout. Restarting...");
         delay(3000);
         ESP.restart();
     }
-
-    logMessage("Connected to WiFi successfully! IP Address: " + WiFi.localIP().toString());
 
     // 3. Configure Secure MQTT Client
     espClient.setInsecure();
@@ -632,7 +619,7 @@ void setup() {
         if (server.hasArg("action")) {
             String action = server.arg("action");
             handleCommand(action);
-            server.send(200, "application/json", getStateJson(">> Executed: " + action));
+            server.send(200, "application/json", getStateJson());
         } else {
             server.send(400, "application/json", "{\"error\":\"Missing action\"}");
         }
@@ -651,7 +638,6 @@ void setup() {
         String tState = server.hasArg("mqtt_topic_state") ? server.arg("mqtt_topic_state") : DEFAULT_MQTT_TOPIC_STATE;
 
         saveConfig(srv, prt, usr, pwd, tCmd, tState);
-        logMessage("New MQTT settings saved to Preferences! Rebooting...");
 
         server.send(200, "text/html", "<h3>Settings Saved! Restarting ESP8266...</h3><script>setTimeout(()=>{window.location='/'}, 4000);</script>");
         delay(1000);
@@ -659,7 +645,6 @@ void setup() {
     });
 
     server.begin();
-    logMessage("HTTP Web Server started on port 80.");
 }
 
 void loop() {
