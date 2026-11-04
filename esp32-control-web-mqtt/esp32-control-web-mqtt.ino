@@ -447,25 +447,35 @@ void processBufferedSerial(const String& data) {
         line.trim();
 
         if (line.length() > 0) {
-            JsonDocument doc;
-            DeserializationError error = deserializeJson(doc, line);
-            if (!error) {
-                for (int i = 1; i <= 4; i++) {
-                    String key = "POWER" + String(i);
-                    if (doc.containsKey(key)) {
-                        bool isOn = (doc[key].as<String>() == "ON");
-                        if (relayStates[i - 1] != isOn) {
-                            relayStates[i - 1] = isOn;
-                            stateChanged = true;
+            // Check if this line is an incoming command from Serial (e.g. POWER1 ON, DIMMER 5, ALL_ON, STATUS)
+            if (line.startsWith("POWER") || line.startsWith("DIMMER") || line == "DIMM_UP" || line == "DIMM_DN" || line == "ALL_ON" || line == "ALL_OFF" || line == "STATUS") {
+                broadcastLog("<< [Serial Cmd] " + line);
+                
+                // Execute command locally and mirror out to MQTT/WebSockets via handleCommand
+                handleCommand(line);
+            } 
+            else {
+                // Otherwise, treat as incoming state telemetry JSON feedback from a slave device
+                JsonDocument doc;
+                DeserializationError error = deserializeJson(doc, line);
+                if (!error) {
+                    for (int i = 1; i <= 4; i++) {
+                        String key = "POWER" + String(i);
+                        if (doc.containsKey(key)) {
+                            bool isOn = (doc[key].as<String>() == "ON");
+                            if (relayStates[i - 1] != isOn) {
+                                relayStates[i - 1] = isOn;
+                                stateChanged = true;
+                            }
                         }
                     }
-                }
 
-                if (doc.containsKey("Dimmer")) {
-                    int dimVal = doc["Dimmer"].as<int>();
-                    if (dimmerValue != dimVal) {
-                        dimmerValue = dimVal;
-                        stateChanged = true;
+                    if (doc.containsKey("Dimmer")) {
+                        int dimVal = doc["Dimmer"].as<int>();
+                        if (dimmerValue != dimVal) {
+                            dimmerValue = dimVal;
+                            stateChanged = true;
+                        }
                     }
                 }
             }
