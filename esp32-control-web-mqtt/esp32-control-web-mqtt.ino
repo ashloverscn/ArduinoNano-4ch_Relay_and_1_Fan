@@ -45,9 +45,11 @@ String serialBuffer = "";
 unsigned long lastCharTime = 0;
 const unsigned long SERIAL_TIMEOUT = 50;
 
-// --- Wi-Fi Reconnection State ---
+// --- Wi-Fi Reconnection & AP Fallback State ---
 unsigned long lastWiFiCheckTime = 0;
 const unsigned long WIFI_RETRY_INTERVAL = 10000; // Check/retry every 10 seconds
+unsigned long wifiDisconnectedStartTime = 0;       // Tracks when Wi-Fi dropped
+const unsigned long WIFI_AP_FALLBACK_TIMEOUT = 600000; // 10 minutes (10 * 60 * 1000 ms)
 
 // --- GPIO 0 Long Press & AP Mode State ---
 const int CONFIG_BUTTON_PIN = 0;
@@ -468,15 +470,31 @@ void logMessage(const String& msg) {
     webSocket.broadcastTXT(output);
 }
 
-// --- Continuous Non-Blocking Wi-Fi Reconnection ---
+// --- Continuous Non-Blocking Wi-Fi Reconnection & 10-Min AP Fallback ---
 void checkWiFiConnection() {
-    if (!apModeActive && WiFi.status() != WL_CONNECTED) {
-        unsigned long currentMillis = millis();
-        if (currentMillis - lastWiFiCheckTime >= WIFI_RETRY_INTERVAL) {
-            lastWiFiCheckTime = currentMillis;
-            logMessage(">> WiFi Disconnected. Attempting reconnection...");
-            WiFi.disconnect();
-            WiFi.begin(stored_ssid.c_str(), stored_password.c_str());
+    if (!apModeActive) {
+        if (WiFi.status() == WL_CONNECTED) {
+            wifiDisconnectedStartTime = 0; // Reset timer when connected
+        } else {
+            // If timer hasn't started yet, mark the start time
+            if (wifiDisconnectedStartTime == 0) {
+                wifiDisconnectedStartTime = millis();
+                logMessage(">> WiFi lost. Starting 10-minute AP fallback timer...");
+            } 
+            // Check if Wi-Fi has been disconnected for longer than 10 minutes
+            else if (millis() - wifiDisconnectedStartTime >= WIFI_AP_FALLBACK_TIMEOUT) {
+                logMessage(">> WiFi reconnection timed out (10 mins exceeded). Entering AP Mode automatically...");
+                enterAPMode();
+                return;
+            }
+
+            unsigned long currentMillis = millis();
+            if (currentMillis - lastWiFiCheckTime >= WIFI_RETRY_INTERVAL) {
+                lastWiFiCheckTime = currentMillis;
+                logMessage(">> WiFi Disconnected. Attempting reconnection...");
+                WiFi.disconnect();
+                WiFi.begin(stored_ssid.c_str(), stored_password.c_str());
+            }
         }
     }
 }
@@ -891,7 +909,7 @@ void loop() {
         return; // In AP mode, only handle web server configuration
     }
 
-    // Ensure Wi-Fi stays connected (retries endlessly)
+    // Ensure Wi-Fi stays connected (retries endlessly for 10 mins before AP fallback)
     checkWiFiConnection();
 
     if (!mqttClient.connected()) {
