@@ -22,6 +22,8 @@ const char* DEFAULT_MQTT_TOPIC_CMD = "home/esp8266/command";
 const char* DEFAULT_MQTT_TOPIC_STATE = "home/esp8266/state";
 
 // --- Runtime Configuration Variables ---
+String stored_ssid;
+String stored_password;
 String mqtt_server;
 int mqtt_port;
 String mqtt_user;
@@ -46,9 +48,11 @@ const unsigned long SERIAL_TIMEOUT = 50;
 // Verbose log queue for web feedback console
 String consoleLogBuffer = "";
 
-// --- Wi-Fi Reconnection State ---
+// --- Wi-Fi Reconnection & AP Fallback State ---
 unsigned long lastWiFiCheckTime = 0;
 const unsigned long WIFI_RETRY_INTERVAL = 10000; // Check/retry every 10 seconds
+unsigned long wifiDisconnectedStartTime = 0;       // Tracks when Wi-Fi dropped
+const unsigned long WIFI_AP_FALLBACK_TIMEOUT = 600000; // 10 minutes (10 * 60 * 1000 ms)
 
 // --- GPIO 0 Long Press & AP Mode State ---
 const int CONFIG_BUTTON_PIN = 0;
@@ -59,7 +63,7 @@ bool apModeActive = false;
 
 // Forward declarations
 void loadConfig();
-void saveConfig(String srv, int prt, String usr, String pwd, String tCmd, String tState);
+void saveConfig(String ssid, String pass, String srv, int prt, String usr, String pwd, String tCmd, String tState);
 void handleCommand(String cmd);
 void processBufferedSerial(String data);
 void reconnectMQTT();
@@ -275,7 +279,7 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     }
 
     window.onload = function() {
-        appendConsole("Connected to ESP8266 WebSocket server.");
+        appendConsole("Connected to ESP8266 controller.");
         sendAction('STATUS');
         pollState();
         setInterval(pollState, 2000);
@@ -286,14 +290,14 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
-// --- Dedicated MQTT Configuration Page HTML ---
+// --- Dedicated Wi-Fi & MQTT Configuration Page HTML ---
 const char CONFIG_PAGE[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MQTT Configuration</title>
+    <title>Device Configuration</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -331,6 +335,7 @@ const char CONFIG_PAGE[] PROGMEM = R"rawliteral(
             margin-top: 5px;
             margin-bottom: 5px;
         }
+        hr { border: 0; border-top: 1px solid #eee; margin: 20px 0; }
         button {
             width: 100%;
             padding: 12px;
@@ -351,9 +356,18 @@ const char CONFIG_PAGE[] PROGMEM = R"rawliteral(
 
 <div class="container">
     <a href="/" class="back-link">&larr; Back to Dashboard</a>
-    <h2>MQTT Configuration</h2>
+    <h2>Device Configuration</h2>
     
     <form action="/save-settings" method="POST">
+        <h3>Wi-Fi Settings</h3>
+        <label>Wi-Fi SSID:</label>
+        <input type="text" name="wifi_ssid" id="cfg_ssid">
+        
+        <label>Wi-Fi Password:</label>
+        <input type="password" name="wifi_pass" id="cfg_pass_wifi">
+
+        <hr>
+        <h3>MQTT Settings</h3>
         <label>MQTT Server:</label>
         <input type="text" name="mqtt_server" id="cfg_server">
         
@@ -380,6 +394,8 @@ const char CONFIG_PAGE[] PROGMEM = R"rawliteral(
     fetch('/get-config')
         .then(res => res.json())
         .then(data => {
+            document.getElementById('cfg_ssid').value = data.ssid || '';
+            document.getElementById('cfg_pass_wifi').value = data.pass_wifi || '';
             document.getElementById('cfg_server').value = data.server;
             document.getElementById('cfg_port').value = data.port;
             document.getElementById('cfg_user').value = data.user;
@@ -396,6 +412,8 @@ const char CONFIG_PAGE[] PROGMEM = R"rawliteral(
 // --- Load and Save Configurations via Preferences ---
 void loadConfig() {
     preferences.begin("config", false);
+    stored_ssid = preferences.getString("ssid", DEFAULT_SSID);
+    stored_password = preferences.getString("password", DEFAULT_PASSWORD);
     mqtt_server = preferences.getString("server", DEFAULT_MQTT_SERVER);
     mqtt_port = preferences.getInt("port", DEFAULT_MQTT_PORT);
     mqtt_user = preferences.getString("user", DEFAULT_MQTT_USER);
@@ -405,8 +423,10 @@ void loadConfig() {
     preferences.end();
 }
 
-void saveConfig(String srv, int prt, String usr, String pwd, String tCmd, String tState) {
+void saveConfig(String ssid, String pass, String srv, int prt, String usr, String pwd, String tCmd, String tState) {
     preferences.begin("config", false);
+    preferences.putString("ssid", ssid);
+    preferences.putString("password", pass);
     preferences.putString("server", srv);
     preferences.putInt("port", prt);
     preferences.putString("user", usr);
@@ -425,15 +445,31 @@ void logMessage(String msg) {
     consoleLogBuffer += msg + "\n";
 }
 
-// --- Continuous Non-Blocking Wi-Fi Reconnection ---
+// --- Continuous Non-Blocking Wi-Fi Reconnection & 10-Min AP Fallback ---
 void checkWiFiConnection() {
-    if (!apModeActive && WiFi.status() != WL_CONNECTED) {
-        unsigned long currentMillis = millis();
-        if (currentMillis - lastWiFiCheckTime >= WIFI_RETRY_INTERVAL) {
-            lastWiFiCheckTime = currentMillis;
-            logMessage(">> WiFi Disconnected. Attempting reconnection...");
-            WiFi.disconnect();
-            WiFi.begin(DEFAULT_SSID, DEFAULT_PASSWORD);
+    if (!apModeActive) {
+        if (WiFi.status() == WL_CONNECTED) {
+            wifiDisconnectedStartTime = 0; // Reset timer when connected
+        } else {
+            // If timer hasn't started yet, mark the start time
+            if (wifiDisconnectedStartTime == 0) {
+                wifiDisconnectedStartTime = millis();
+                logMessage(">> WiFi lost. Starting 10-minute AP fallback timer...");
+            } 
+            // Check if Wi-Fi has been disconnected for longer than 10 minutes
+            else if (millis() - wifiDisconnectedStartTime >= WIFI_AP_FALLBACK_TIMEOUT) {
+                logMessage(">> WiFi reconnection timed out (10 mins exceeded). Entering AP Mode automatically...");
+                enterAPMode();
+                return;
+            }
+
+            unsigned long currentMillis = millis();
+            if (currentMillis - lastWiFiCheckTime >= WIFI_RETRY_INTERVAL) {
+                lastWiFiCheckTime = currentMillis;
+                logMessage(">> WiFi Disconnected. Attempting reconnection...");
+                WiFi.disconnect();
+                WiFi.begin(stored_ssid.c_str(), stored_password.c_str());
+            }
         }
     }
 }
@@ -466,7 +502,7 @@ void enterAPMode() {
     WiFi.disconnect();
     WiFi.mode(WIFI_AP);
     
-    // Start SoftAP using WiFiManager's standard AP configuration portal approach or standard softAP
+    // Start SoftAP
     bool apStarted = WiFi.softAP("ESP8266-Setup-AP", "12345678");
     if (apStarted) {
         logMessage(">> AP Mode Started Successfully!");
@@ -484,6 +520,8 @@ void enterAPMode() {
 
     server.on("/get-config", [](){
         JsonDocument doc;
+        doc["ssid"] = stored_ssid;
+        doc["pass_wifi"] = stored_password;
         doc["server"] = mqtt_server;
         doc["port"] = mqtt_port;
         doc["user"] = mqtt_user;
@@ -496,6 +534,8 @@ void enterAPMode() {
     });
 
     server.on("/save-settings", HTTP_POST, [](){
+        String s_ssid = server.hasArg("wifi_ssid") ? server.arg("wifi_ssid") : DEFAULT_SSID;
+        String s_pass = server.hasArg("wifi_pass") ? server.arg("wifi_pass") : DEFAULT_PASSWORD;
         String srv = server.hasArg("mqtt_server") ? server.arg("mqtt_server") : DEFAULT_MQTT_SERVER;
         int prt = server.hasArg("mqtt_port") ? server.arg("mqtt_port").toInt() : DEFAULT_MQTT_PORT;
         String usr = server.hasArg("mqtt_user") ? server.arg("mqtt_user") : DEFAULT_MQTT_USER;
@@ -503,7 +543,7 @@ void enterAPMode() {
         String tCmd = server.hasArg("mqtt_topic_cmd") ? server.arg("mqtt_topic_cmd") : DEFAULT_MQTT_TOPIC_CMD;
         String tState = server.hasArg("mqtt_topic_state") ? server.arg("mqtt_topic_state") : DEFAULT_MQTT_TOPIC_STATE;
 
-        saveConfig(srv, prt, usr, pwd, tCmd, tState);
+        saveConfig(s_ssid, s_pass, srv, prt, usr, pwd, tCmd, tState);
 
         server.send(200, "text/html", "<h3>Settings Saved! Restarting ESP8266...</h3><script>setTimeout(()=>{window.location='/'}, 4000);</script>");
         delay(1000);
@@ -700,20 +740,18 @@ void setup() {
     // Initialize GPIO 0 button pin with internal pull-up
     pinMode(CONFIG_BUTTON_PIN, INPUT_PULLUP);
 
-    // 1. Load Stored MQTT Configurations
+    // 1. Load Stored Configurations (Wi-Fi + MQTT)
     loadConfig();
 
-    // 2. WiFiManager Configuration Portal Setup (Passwordless Open AP)
-    WiFiManager wm;
+    // 2. WiFi Connect using stored credentials with fallback
+    WiFi.begin(stored_ssid.c_str(), stored_password.c_str());
     
-    wm.setAPCallback([](WiFiManager *myWiFiManager) {
-        // Silent AP callback
-    });
-
-    bool res = wm.autoConnect("ESP8266-ConfigPortal");
-    if(!res) {
-        delay(3000);
-        ESP.restart();
+    unsigned long startAttempt = millis();
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        if (millis() - startAttempt > 15000) {
+            break;
+        }
     }
 
     // 3. Configure Secure MQTT Client
@@ -733,6 +771,8 @@ void setup() {
 
     server.on("/get-config", [](){
         JsonDocument doc;
+        doc["ssid"] = stored_ssid;
+        doc["pass_wifi"] = stored_password;
         doc["server"] = mqtt_server;
         doc["port"] = mqtt_port;
         doc["user"] = mqtt_user;
@@ -759,6 +799,8 @@ void setup() {
     });
 
     server.on("/save-settings", HTTP_POST, [](){
+        String s_ssid = server.hasArg("wifi_ssid") ? server.arg("wifi_ssid") : DEFAULT_SSID;
+        String s_pass = server.hasArg("wifi_pass") ? server.arg("wifi_pass") : DEFAULT_PASSWORD;
         String srv = server.hasArg("mqtt_server") ? server.arg("mqtt_server") : DEFAULT_MQTT_SERVER;
         int prt = server.hasArg("mqtt_port") ? server.arg("mqtt_port").toInt() : DEFAULT_MQTT_PORT;
         String usr = server.hasArg("mqtt_user") ? server.arg("mqtt_user") : DEFAULT_MQTT_USER;
@@ -766,7 +808,7 @@ void setup() {
         String tCmd = server.hasArg("mqtt_topic_cmd") ? server.arg("mqtt_topic_cmd") : DEFAULT_MQTT_TOPIC_CMD;
         String tState = server.hasArg("mqtt_topic_state") ? server.arg("mqtt_topic_state") : DEFAULT_MQTT_TOPIC_STATE;
 
-        saveConfig(srv, prt, usr, pwd, tCmd, tState);
+        saveConfig(s_ssid, s_pass, srv, prt, usr, pwd, tCmd, tState);
 
         server.send(200, "text/html", "<h3>Settings Saved! Restarting ESP8266...</h3><script>setTimeout(()=>{window.location='/'}, 4000);</script>");
         delay(1000);
@@ -777,15 +819,15 @@ void setup() {
 }
 
 void loop() {
-    // Continuously monitor GPIO 0 button for long press
+    // Continuously monitor GPIO 0 button for long press (3 seconds triggers AP mode)
     checkButton();
 
     if (apModeActive) {
         server.handleClient();
-        return; // In AP mode, only handle web server configuration
+        return; // In AP mode, only handle web server configuration portal
     }
 
-    // Ensure Wi-Fi stays connected (retries endlessly)
+    // Ensure Wi-Fi stays connected (retries endlessly with 10-minute timeout fallback to AP mode)
     checkWiFiConnection();
 
     if (!mqttClient.connected()) {
