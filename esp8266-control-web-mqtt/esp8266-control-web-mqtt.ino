@@ -46,6 +46,10 @@ const unsigned long SERIAL_TIMEOUT = 50;
 // Verbose log queue for web feedback console
 String consoleLogBuffer = "";
 
+// --- Wi-Fi Reconnection State ---
+unsigned long lastWiFiCheckTime = 0;
+const unsigned long WIFI_RETRY_INTERVAL = 10000; // Check/retry every 10 seconds
+
 // Forward declarations
 void loadConfig();
 void saveConfig(String srv, int prt, String usr, String pwd, String tCmd, String tState);
@@ -55,6 +59,7 @@ void reconnectMQTT();
 void callbackMQTT(char* topic, byte* payload, unsigned int length);
 String getStateJson(String logMsg = "");
 void logMessage(String msg);
+void checkWiFiConnection();
 
 // --- Main Dashboard HTML Template ---
 const char MAIN_PAGE[] PROGMEM = R"rawliteral(
@@ -411,6 +416,19 @@ void logMessage(String msg) {
     consoleLogBuffer += msg + "\n";
 }
 
+// --- Continuous Non-Blocking Wi-Fi Reconnection ---
+void checkWiFiConnection() {
+    if (WiFi.status() != WL_CONNECTED) {
+        unsigned long currentMillis = millis();
+        if (currentMillis - lastWiFiCheckTime >= WIFI_RETRY_INTERVAL) {
+            lastWiFiCheckTime = currentMillis;
+            logMessage(">> WiFi Disconnected. Attempting reconnection...");
+            WiFi.disconnect();
+            WiFi.begin(DEFAULT_SSID, DEFAULT_PASSWORD);
+        }
+    }
+}
+
 // --- MQTT Callback ---
 void callbackMQTT(char* topic, byte* payload, unsigned int length) {
     String message;
@@ -668,6 +686,9 @@ void setup() {
 }
 
 void loop() {
+    // Ensure Wi-Fi stays connected (retries endlessly)
+    checkWiFiConnection();
+
     if (!mqttClient.connected()) {
         reconnectMQTT();
     }
