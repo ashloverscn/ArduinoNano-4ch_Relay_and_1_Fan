@@ -50,6 +50,13 @@ String consoleLogBuffer = "";
 unsigned long lastWiFiCheckTime = 0;
 const unsigned long WIFI_RETRY_INTERVAL = 10000; // Check/retry every 10 seconds
 
+// --- GPIO 0 Long Press & AP Mode State ---
+const int CONFIG_BUTTON_PIN = 0;
+unsigned long buttonPressStartTime = 0;
+bool buttonStateLast = HIGH;
+const unsigned long LONG_PRESS_DURATION = 3000; // 3 seconds hold to trigger AP mode
+bool apModeActive = false;
+
 // Forward declarations
 void loadConfig();
 void saveConfig(String srv, int prt, String usr, String pwd, String tCmd, String tState);
@@ -60,6 +67,8 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length);
 String getStateJson(String logMsg = "");
 void logMessage(String msg);
 void checkWiFiConnection();
+void checkButton();
+void enterAPMode();
 
 // --- Main Dashboard HTML Template ---
 const char MAIN_PAGE[] PROGMEM = R"rawliteral(
@@ -418,7 +427,7 @@ void logMessage(String msg) {
 
 // --- Continuous Non-Blocking Wi-Fi Reconnection ---
 void checkWiFiConnection() {
-    if (WiFi.status() != WL_CONNECTED) {
+    if (!apModeActive && WiFi.status() != WL_CONNECTED) {
         unsigned long currentMillis = millis();
         if (currentMillis - lastWiFiCheckTime >= WIFI_RETRY_INTERVAL) {
             lastWiFiCheckTime = currentMillis;
@@ -427,6 +436,81 @@ void checkWiFiConnection() {
             WiFi.begin(DEFAULT_SSID, DEFAULT_PASSWORD);
         }
     }
+}
+
+// --- GPIO 0 Long Press Detection ---
+void checkButton() {
+    int currentState = digitalRead(CONFIG_BUTTON_PIN);
+    
+    // Button pressed (GPIO 0 goes LOW when pressed)
+    if (currentState == LOW && buttonStateLast == HIGH) {
+        buttonPressStartTime = millis();
+        buttonStateLast = LOW;
+    } 
+    // Button is held down continuously
+    else if (currentState == LOW && buttonStateLast == LOW) {
+        if (!apModeActive && (millis() - buttonPressStartTime >= LONG_PRESS_DURATION)) {
+            logMessage(">> Long press detected on GPIO 0! Entering AP Configuration Mode...");
+            enterAPMode();
+        }
+    } 
+    // Button released
+    else if (currentState == HIGH && buttonStateLast == LOW) {
+        buttonStateLast = HIGH;
+    }
+}
+
+// --- Enter Access Point Mode for Reconfiguration ---
+void enterAPMode() {
+    apModeActive = true;
+    WiFi.disconnect();
+    WiFi.mode(WIFI_AP);
+    
+    // Start SoftAP using WiFiManager's standard AP configuration portal approach or standard softAP
+    bool apStarted = WiFi.softAP("ESP8266-Setup-AP", "12345678");
+    if (apStarted) {
+        logMessage(">> AP Mode Started Successfully!");
+        logMessage(">> SSID: ESP8266-Setup-AP | Password: 12345678");
+        logMessage(">> Connect and open http://192.168.4.1");
+    } else {
+        logMessage(">> Failed to start AP Mode!");
+    }
+
+    server.stop();
+
+    server.on("/", [](){
+        server.send_P(200, "text/html", CONFIG_PAGE);
+    });
+
+    server.on("/get-config", [](){
+        JsonDocument doc;
+        doc["server"] = mqtt_server;
+        doc["port"] = mqtt_port;
+        doc["user"] = mqtt_user;
+        doc["pass"] = mqtt_pass;
+        doc["tcmd"] = mqtt_topic_cmd;
+        doc["tstate"] = mqtt_topic_state;
+        String response;
+        serializeJson(doc, response);
+        server.send(200, "application/json", response);
+    });
+
+    server.on("/save-settings", HTTP_POST, [](){
+        String srv = server.hasArg("mqtt_server") ? server.arg("mqtt_server") : DEFAULT_MQTT_SERVER;
+        int prt = server.hasArg("mqtt_port") ? server.arg("mqtt_port").toInt() : DEFAULT_MQTT_PORT;
+        String usr = server.hasArg("mqtt_user") ? server.arg("mqtt_user") : DEFAULT_MQTT_USER;
+        String pwd = server.hasArg("mqtt_pass") ? server.arg("mqtt_pass") : DEFAULT_MQTT_PASS;
+        String tCmd = server.hasArg("mqtt_topic_cmd") ? server.arg("mqtt_topic_cmd") : DEFAULT_MQTT_TOPIC_CMD;
+        String tState = server.hasArg("mqtt_topic_state") ? server.arg("mqtt_topic_state") : DEFAULT_MQTT_TOPIC_STATE;
+
+        saveConfig(srv, prt, usr, pwd, tCmd, tState);
+
+        server.send(200, "text/html", "<h3>Settings Saved! Restarting ESP8266...</h3><script>setTimeout(()=>{window.location='/'}, 4000);</script>");
+        delay(1000);
+        ESP.restart();
+    });
+
+    server.begin();
 }
 
 // --- MQTT Callback ---
@@ -456,10 +540,14 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length) {
 
 // --- MQTT Reconnect ---
 void reconnectMQTT() {
-    if (!mqttClient.connected()) {
-        String clientId = "ESP8266Client-" + String(ESP.getChipId());
-        if (mqttClient.connect(clientId.c_str(), mqtt_user.c_str(), mqtt_pass.c_str())) {
-            mqttClient.subscribe(mqtt_topic_state.c_str());
+    if (!apModeActive && !mqttClient.connected() && WiFi.status() == WL_CONNECTED) {
+        static unsigned long lastMqttRetry = 0;
+        if (millis() - lastMqttRetry > 5000) {
+            lastMqttRetry = millis();
+            String clientId = "ESP8266Client-" + String(ESP.getChipId());
+            if (mqttClient.connect(clientId.c_str(), mqtt_user.c_str(), mqtt_pass.c_str())) {
+                mqttClient.subscribe(mqtt_topic_state.c_str());
+            }
         }
     }
 }
@@ -609,6 +697,9 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
 
+    // Initialize GPIO 0 button pin with internal pull-up
+    pinMode(CONFIG_BUTTON_PIN, INPUT_PULLUP);
+
     // 1. Load Stored MQTT Configurations
     loadConfig();
 
@@ -686,6 +777,14 @@ void setup() {
 }
 
 void loop() {
+    // Continuously monitor GPIO 0 button for long press
+    checkButton();
+
+    if (apModeActive) {
+        server.handleClient();
+        return; // In AP mode, only handle web server configuration
+    }
+
     // Ensure Wi-Fi stays connected (retries endlessly)
     checkWiFiConnection();
 
