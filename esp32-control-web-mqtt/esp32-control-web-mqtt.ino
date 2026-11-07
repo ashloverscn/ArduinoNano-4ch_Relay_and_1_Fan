@@ -72,7 +72,7 @@ void checkWiFiConnection();
 void checkButton();
 void enterAPMode();
 
-// --- HTML Template (Dashboard) ---
+// --- HTML Template (Dashboard with Exponential Backoff WS) ---
 const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="en">
@@ -227,11 +227,13 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
 <script>
     let ws;
     let relayStates = [false, false, false, false];
+    let reconnectAttempts = 0;
 
     function initWebSocket() {
         ws = new WebSocket('ws://' + window.location.hostname + ':81/');
         
         ws.onopen = function(event) {
+            reconnectAttempts = 0; // Reset counter on successful connection
             updateConnectionBanner(true);
             appendConsole("Connected to ESP32 WebSocket server.");
             sendCommand('STATUS');
@@ -239,8 +241,11 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
         
         ws.onclose = function(event) {
             updateConnectionBanner(false);
-            appendConsole("Disconnected. Reconnecting in 2s...");
-            setTimeout(initWebSocket, 2000);
+            // Exponential backoff capped at 10 seconds to prevent flooding and UI lock
+            let timeout = Math.min(1000 * Math.pow(1.5, reconnectAttempts), 10000);
+            appendConsole(`Disconnected. Reconnecting in ${Math.round(timeout/1000)}s...`);
+            setTimeout(initWebSocket, timeout);
+            reconnectAttempts++;
         };
         
         ws.onmessage = function(event) {
@@ -646,17 +651,20 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length) {
     }
 }
 
-// --- Reconnect MQTT (Subscribes to both command and state topics) ---
+// --- Reconnect MQTT (Non-blocking with 10s backoff interval) ---
 void reconnectMQTT() {
     if (!apModeActive && !mqttClient.connected() && WiFi.status() == WL_CONNECTED) {
         static unsigned long lastMqttRetry = 0;
-        if (millis() - lastMqttRetry > 5000) {
+        if (millis() - lastMqttRetry > 10000) { // Changed to 10s to prevent starvation
             lastMqttRetry = millis();
+            logMessage(">> Attempting MQTT connection...");
             String clientId = "ESP32Gateway-" + String((uint32_t)ESP.getEfuseMac(), HEX);
             if (mqttClient.connect(clientId.c_str(), mqtt_user.c_str(), mqtt_pass.c_str())) {
                 logMessage(">> MQTT Connected!");
                 mqttClient.subscribe(mqtt_topic_cmd.c_str());
                 mqttClient.subscribe(mqtt_topic_state.c_str());
+            } else {
+                logMessage(">> MQTT Connection failed, rc=" + String(mqttClient.state()) + ". Retrying later...");
             }
         }
     }
