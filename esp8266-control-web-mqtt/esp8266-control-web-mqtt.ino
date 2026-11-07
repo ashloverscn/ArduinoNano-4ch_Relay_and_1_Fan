@@ -51,7 +51,7 @@ String consoleLogBuffer = "";
 // --- Wi-Fi Reconnection & AP Fallback State ---
 unsigned long lastWiFiCheckTime = 0;
 const unsigned long WIFI_RETRY_INTERVAL = 10000; // Check/retry every 10 seconds
-unsigned long wifiDisconnectedStartTime = 0;       // Tracks when Wi-Fi dropped
+unsigned long wifiDisconnectedStartTime = 0;        // Tracks when Wi-Fi dropped
 const unsigned long WIFI_AP_FALLBACK_TIMEOUT = 600000; // 10 minutes (10 * 60 * 1000 ms)
 
 // --- GPIO 0 Long Press & AP Mode State ---
@@ -553,7 +553,7 @@ void enterAPMode() {
     server.begin();
 }
 
-// --- MQTT Callback ---
+// --- MQTT Callback for Inbound Commands & State Sync ---
 void callbackMQTT(char* topic, byte* payload, unsigned int length) {
     String message;
     for (unsigned int i = 0; i < length; i++) {
@@ -561,24 +561,38 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length) {
     }
     message.trim();
     
-    logMessage("<< [MQTT State Sync]");
+    logMessage("<< [MQTT Received on " + String(topic) + "]: " + message);
 
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, message);
-    if (!error && doc["type"] == "state_update") {
-        if (doc.containsKey("relays")) {
-            JsonArray relays = doc["relays"];
-            for (int i = 0; i < 4; i++) {
-                relayStates[i] = relays[i];
-            }
+    // Handle incoming commands from command topic
+    if (String(topic) == mqtt_topic_cmd) {
+        JsonDocument doc;
+        DeserializationError error = deserializeJson(doc, message);
+        if (!error && doc.containsKey("command")) {
+            String cmd = doc["command"].as<String>();
+            handleCommand(cmd);
+        } else {
+            handleCommand(message);
         }
-        if (doc.containsKey("dimmer")) {
-            dimmerValue = doc["dimmer"];
+    }
+    // Handle state updates from state topic
+    else if (String(topic) == mqtt_topic_state) {
+        JsonDocument doc;
+        DeserializationError error = deserializeJson(doc, message);
+        if (!error && doc["type"] == "state_update") {
+            if (doc.containsKey("relays")) {
+                JsonArray relays = doc["relays"];
+                for (int i = 0; i < 4; i++) {
+                    relayStates[i] = relays[i];
+                }
+            }
+            if (doc.containsKey("dimmer")) {
+                dimmerValue = doc["dimmer"];
+            }
         }
     }
 }
 
-// --- MQTT Reconnect ---
+// --- MQTT Reconnect (Subscribes to both command and state topics) ---
 void reconnectMQTT() {
     if (!apModeActive && !mqttClient.connected() && WiFi.status() == WL_CONNECTED) {
         static unsigned long lastMqttRetry = 0;
@@ -586,6 +600,8 @@ void reconnectMQTT() {
             lastMqttRetry = millis();
             String clientId = "ESP8266Client-" + String(ESP.getChipId());
             if (mqttClient.connect(clientId.c_str(), mqtt_user.c_str(), mqtt_pass.c_str())) {
+                logMessage(">> MQTT Connected!");
+                mqttClient.subscribe(mqtt_topic_cmd.c_str());
                 mqttClient.subscribe(mqtt_topic_state.c_str());
             }
         }
