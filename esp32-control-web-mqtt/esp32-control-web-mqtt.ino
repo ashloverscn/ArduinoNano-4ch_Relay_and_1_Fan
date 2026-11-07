@@ -48,7 +48,7 @@ const unsigned long SERIAL_TIMEOUT = 50;
 // --- Wi-Fi Reconnection & AP Fallback State ---
 unsigned long lastWiFiCheckTime = 0;
 const unsigned long WIFI_RETRY_INTERVAL = 10000; // Check/retry every 10 seconds
-unsigned long wifiDisconnectedStartTime = 0;       // Tracks when Wi-Fi dropped
+unsigned long wifiDisconnectedStartTime = 0;        // Tracks when Wi-Fi dropped
 const unsigned long WIFI_AP_FALLBACK_TIMEOUT = 600000; // 10 minutes (10 * 60 * 1000 ms)
 
 // --- GPIO 0 Long Press & AP Mode State ---
@@ -476,12 +476,10 @@ void checkWiFiConnection() {
         if (WiFi.status() == WL_CONNECTED) {
             wifiDisconnectedStartTime = 0; // Reset timer when connected
         } else {
-            // If timer hasn't started yet, mark the start time
             if (wifiDisconnectedStartTime == 0) {
                 wifiDisconnectedStartTime = millis();
                 logMessage(">> WiFi lost. Starting 10-minute AP fallback timer...");
             } 
-            // Check if Wi-Fi has been disconnected for longer than 10 minutes
             else if (millis() - wifiDisconnectedStartTime >= WIFI_AP_FALLBACK_TIMEOUT) {
                 logMessage(">> WiFi reconnection timed out (10 mins exceeded). Entering AP Mode automatically...");
                 enterAPMode();
@@ -503,19 +501,16 @@ void checkWiFiConnection() {
 void checkButton() {
     int currentState = digitalRead(CONFIG_BUTTON_PIN);
     
-    // Button pressed (GPIO 0 goes LOW when pressed)
     if (currentState == LOW && buttonStateLast == HIGH) {
         buttonPressStartTime = millis();
         buttonStateLast = LOW;
     } 
-    // Button is held down continuously
     else if (currentState == LOW && buttonStateLast == LOW) {
         if (!apModeActive && (millis() - buttonPressStartTime >= LONG_PRESS_DURATION)) {
             logMessage(">> Long press detected on GPIO 0! Entering AP Configuration Mode...");
             enterAPMode();
         }
     } 
-    // Button released
     else if (currentState == HIGH && buttonStateLast == LOW) {
         buttonStateLast = HIGH;
     }
@@ -527,7 +522,6 @@ void enterAPMode() {
     WiFi.disconnect();
     WiFi.mode(WIFI_AP);
     
-    // Start SoftAP
     bool apStarted = WiFi.softAP("ESP32-Setup-AP", "12345678");
     if (apStarted) {
         logMessage(">> AP Mode Started Successfully!");
@@ -537,7 +531,6 @@ void enterAPMode() {
         logMessage(">> Failed to start AP Mode!");
     }
 
-    // Stop normal WebSocket and reconfigure server routes for setup
     webSocket.close();
     server.stop();
 
@@ -602,7 +595,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
     }
 }
 
-// --- MQTT Callback for Inbound State / Sync ---
+// --- MQTT Callback for Inbound Commands & State Sync ---
 void callbackMQTT(char* topic, byte* payload, unsigned int length) {
     String message;
     for (unsigned int i = 0; i < length; i++) {
@@ -610,36 +603,50 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length) {
     }
     message.trim();
     
-    logMessage("<< [MQTT State Sync]");
+    logMessage("<< [MQTT Received on " + String(topic) + "]: " + message);
 
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, message);
-    if (!error && doc["type"] == "state_update") {
-        bool changed = false;
-        if (doc.containsKey("relays")) {
-            JsonArray relays = doc["relays"];
-            for (int i = 0; i < 4; i++) {
-                bool val = relays[i];
-                if (relayStates[i] != val) {
-                    relayStates[i] = val;
+    // Handle incoming commands from command topic
+    if (String(topic) == mqtt_topic_cmd) {
+        JsonDocument doc;
+        DeserializationError error = deserializeJson(doc, message);
+        if (!error && doc.containsKey("command")) {
+            String cmd = doc["command"].as<String>();
+            handleCommand(cmd);
+        } else {
+            handleCommand(message);
+        }
+    }
+    // Handle state updates from state topic
+    else if (String(topic) == mqtt_topic_state) {
+        JsonDocument doc;
+        DeserializationError error = deserializeJson(doc, message);
+        if (!error && doc["type"] == "state_update") {
+            bool changed = false;
+            if (doc.containsKey("relays")) {
+                JsonArray relays = doc["relays"];
+                for (int i = 0; i < 4; i++) {
+                    bool val = relays[i];
+                    if (relayStates[i] != val) {
+                        relayStates[i] = val;
+                        changed = true;
+                    }
+                }
+            }
+            if (doc.containsKey("dimmer")) {
+                int dim = doc["dimmer"];
+                if (dimmerValue != dim) {
+                    dimmerValue = dim;
                     changed = true;
                 }
             }
-        }
-        if (doc.containsKey("dimmer")) {
-            int dim = doc["dimmer"];
-            if (dimmerValue != dim) {
-                dimmerValue = dim;
-                changed = true;
+            if (changed) {
+                broadcastState();
             }
-        }
-        if (changed) {
-            broadcastState();
         }
     }
 }
 
-// --- Reconnect MQTT (Non-Blocking interval check) ---
+// --- Reconnect MQTT (Subscribes to both command and state topics) ---
 void reconnectMQTT() {
     if (!apModeActive && !mqttClient.connected() && WiFi.status() == WL_CONNECTED) {
         static unsigned long lastMqttRetry = 0;
@@ -647,13 +654,15 @@ void reconnectMQTT() {
             lastMqttRetry = millis();
             String clientId = "ESP32Gateway-" + String((uint32_t)ESP.getEfuseMac(), HEX);
             if (mqttClient.connect(clientId.c_str(), mqtt_user.c_str(), mqtt_pass.c_str())) {
+                logMessage(">> MQTT Connected!");
+                mqttClient.subscribe(mqtt_topic_cmd.c_str());
                 mqttClient.subscribe(mqtt_topic_state.c_str());
             }
         }
     }
 }
 
-// --- Translate Web UI Actions and Append STATUS ---
+// --- Translate Web UI / MQTT Actions and Append STATUS ---
 void handleCommand(const String& cmd) {
     String trimmedCmd = cmd;
     trimmedCmd.trim();
