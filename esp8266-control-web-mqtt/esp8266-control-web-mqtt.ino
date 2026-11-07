@@ -228,6 +228,7 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
 
 <script>
     let relayStates = [false, false, false, false];
+    let pollInterval = 3000; // Increased to 3s to reduce web server load during disconnects
 
     function toggleRelay(relayNum) {
         const currentState = relayStates[relayNum - 1];
@@ -241,13 +242,15 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
     function sendAction(cmd) {
         fetch('/cmd?action=' + encodeURIComponent(cmd))
             .then(res => res.json())
-            .then(data => updateUIState(data));
+            .then(data => updateUIState(data))
+            .catch(err => console.log('Command network error safely handled'));
     }
 
     function pollState() {
         fetch('/status-json')
             .then(res => res.json())
-            .then(data => updateUIState(data));
+            .then(data => updateUIState(data))
+            .catch(err => console.log('Poll network error safely handled'));
     }
 
     function updateUIState(data) {
@@ -282,7 +285,7 @@ const char MAIN_PAGE[] PROGMEM = R"rawliteral(
         appendConsole("Connected to ESP8266 controller.");
         sendAction('STATUS');
         pollState();
-        setInterval(pollState, 2000);
+        setInterval(pollState, pollInterval);
     };
 </script>
 
@@ -592,17 +595,19 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length) {
     }
 }
 
-// --- MQTT Reconnect (Subscribes to both command and state topics) ---
+// --- MQTT Reconnect (Non-blocking with 10s backoff interval) ---
 void reconnectMQTT() {
     if (!apModeActive && !mqttClient.connected() && WiFi.status() == WL_CONNECTED) {
         static unsigned long lastMqttRetry = 0;
-        if (millis() - lastMqttRetry > 5000) {
+        if (millis() - lastMqttRetry > 10000) { // Changed to 10s to prevent starvation
             lastMqttRetry = millis();
             String clientId = "ESP8266Client-" + String(ESP.getChipId());
             if (mqttClient.connect(clientId.c_str(), mqtt_user.c_str(), mqtt_pass.c_str())) {
                 logMessage(">> MQTT Connected!");
                 mqttClient.subscribe(mqtt_topic_cmd.c_str());
                 mqttClient.subscribe(mqtt_topic_state.c_str());
+            } else {
+                logMessage(">> MQTT Connection failed, rc=" + String(mqttClient.state()) + ". Retrying later...");
             }
         }
     }
