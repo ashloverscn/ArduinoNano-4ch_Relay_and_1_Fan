@@ -12,7 +12,7 @@ A professional, feature-rich hybrid home automation firmware suite built around 
 
 ## 💡 Project Overview: 4ch Relay Board with Leading Edge AC Dimmer (4 lights & 1 Fan)
 
-This implementation utilizes an Arduino Nano (ATmega328P) running a dedicated leading-edge AC phase control library to govern 3 lighting relay channels and 1 fan speed regulator, communicating bidirectionally with an ESP master module.
+This implementation utilizes an Arduino Nano (ATmega328P) running a dedicated leading-edge AC phase control library to govern 4 lighting relay channels and 1 fan speed regulator, communicating bidirectionally with an ESP master module.
 
 ### Libraries Needed
 * **`EEPROM.h`** – Already present in Arduino core
