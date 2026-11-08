@@ -6,11 +6,11 @@
 ![MQTT](https://img.shields.io/badge/MQTT-TLS%2FSSL-success?logo=mqtt)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-A professional, feature-rich hybrid home automation firmware suite built around a robust **Master-Slave architecture**. An **ESP32 or ESP8266 microcontroller** acts as the intelligent master node (hosting responsive web dashboards and a secure cloud MQTT bridge), while an **ATmega328P microcontroller (Arduino Nano)** operates as the real-time slave node managing 3 lights, 1 fan dimmer, physical wall switches, and infrared remote controls.
+A professional, feature-rich hybrid home automation firmware suite built around a robust **Master-Slave architecture**. An **ESP32 or ESP8266 microcontroller** acts as the intelligent master node (hosting responsive web dashboards and a secure cloud MQTT bridge), while an **ATmega328P microcontroller (Arduino Nano)** operates as the real-time slave node managing 4 lights, 1 fan dimmer, physical wall switches, and infrared remote controls.
 
 ---
 
-## 💡 Project Overview: 4ch Relay Board with Leading Edge AC Dimmer (3 Lights & 1 Fan)
+## 💡 Project Overview: 4ch Relay Board with Leading Edge AC Dimmer (4 lights & 1 Fan)
 
 This implementation utilizes an Arduino Nano (ATmega328P) running a dedicated leading-edge AC phase control library to govern 3 lighting relay channels and 1 fan speed regulator, communicating bidirectionally with an ESP master module.
 
@@ -46,7 +46,7 @@ Custom printed circuit board (PCB) layouts and hardware schematics for this proj
 * **Serial UART Bridge:** Bidirectional command and telemetry exchange over serial UART (`115200 baud`) utilizing robust 50ms silence-timeout batch buffering and JSON payload formatting.
 
 ### 2. Multi-Channel Relay & AC Phase-Cut Fan Dimmer
-* **Appliance Switching:** Controls independent relay channels dedicated to 3 lights and ancillary loads.
+* **Appliance Switching:** Controls independent relay channels dedicated to 4 lights and ancillary loads.
 * **AC Phase-Cut Fan Dimmer:** Features a 10-stage dimmer (levels 0–9) utilizing a Zero-Crossing Detection (ZCD) interrupt (`INT0`) and hardware timers to trigger a TRIAC gate driver at precise microsecond phase delays.
 * **EEPROM State Persistence:** Automatically saves relay states and dimmer values to the ATmega328P's internal non-volatile EEPROM memory so settings survive power cycles.
 
