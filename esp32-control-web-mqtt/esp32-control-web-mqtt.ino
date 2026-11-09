@@ -17,8 +17,8 @@ const char* DEFAULT_MQTT_SERVER = "i11b0026.ala.eu-central-1.emqxsl.com";
 const int   DEFAULT_MQTT_PORT = 8883;
 const char* DEFAULT_MQTT_USER = "admin";
 const char* DEFAULT_MQTT_PASS = "admin1234S";
-const char* DEFAULT_MQTT_TOPIC_CMD = "home/esp8266/command";
-const char* DEFAULT_MQTT_TOPIC_STATE = "home/esp8266/state";
+const char* DEFAULT_MQTT_TOPIC_CMD = "home/esp32/command";
+const char* DEFAULT_MQTT_TOPIC_STATE = "home/esp32/state";
 
 // --- Runtime Configuration Variables ---
 String stored_ssid;
