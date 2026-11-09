@@ -270,7 +270,7 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
     function updateConnectionBanner(connected) {
         const banner = document.getElementById('connectionStatus');
         if (connected) {
-            banner.innerText = "Status: Connected (ESP32 Direct)";
+            banner.innerText = "Status: Connected ";
             banner.className = "status-connected";
         } else {
             banner.innerText = "Status: Disconnected";
