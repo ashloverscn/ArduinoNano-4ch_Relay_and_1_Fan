@@ -30,19 +30,17 @@ String mqtt_pass;
 String mqtt_topic_cmd;
 String mqtt_topic_state;
 
-// --- Controller State (Bridged from Slave / Web UI) ---
-bool relayStates[4] = {false, false, false, false};
-int dimmerValue = 0; 
-bool triacState = false;
+// --- Stateless Raw State Cache (Only holds last received string from slave for web/mqtt polling) ---
+String latestSlaveStateJson = "{\"POWER1\":\"OFF\",\"POWER2\":\"OFF\",\"POWER3\":\"OFF\",\"POWER4\":\"OFF\",\"Dimmer\":0}";
 
 auto timer = timer_create_default();
 
-// --- Web Server & MQTT (No WebSockets) ---
+// --- Web Server & MQTT ---
 WebServer server(80);
 WiFiClientSecure espClient;
 PubSubClient mqttClient(espClient);
 
-// --- Serial Buffering State (50ms Silence Timeout) ---
+// --- Serial & Reconnection State ---
 String serialBuffer = "";
 unsigned long lastCharTime = 0;
 const unsigned long SERIAL_TIMEOUT = 50;
@@ -50,7 +48,6 @@ const unsigned long SERIAL_TIMEOUT = 50;
 // --- Web Console Log Ring Buffer ---
 String webLogBuffer = "";
 
-// --- Wi-Fi Reconnection & AP Fallback State ---
 unsigned long lastWiFiCheckTime = 0;
 const unsigned long WIFI_RETRY_INTERVAL = 10000; 
 unsigned long wifiDisconnectedStartTime = 0;         
@@ -73,7 +70,6 @@ void checkWiFiConnection();
 void checkButton();
 void enterAPMode();
 bool sendPeriodicStatus(void*);
-String getStateJSON();
 
 // --- Main Dashboard HTML Template (HTTP Short-Polling) ---
 const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
@@ -82,7 +78,7 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ESP32 Home Automation Bridge</title>
+    <title>ESP32 Stateless UART Bridge</title>
     <style>
         body { font-family: Arial, sans-serif; background-color: #f4f6f8; margin: 0; padding: 20px; display: flex; justify-content: center; }
         .container { width: 100%; max-width: 650px; background: #ffffff; border-radius: 8px; padding: 20px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); position: relative; }
@@ -107,7 +103,7 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
 <body>
 <div class="container">
     <a href="/config" class="config-link">⚙️ Config</a>
-    <h2>ESP32 Home Automation Bridge</h2>
+    <h2>ESP32 UART Bridge</h2>
     <div class="card">
         <div class="card-title">System Status</div>
         <div id="connectionStatus" class="status-disconnected">Status: Disconnected</div>
@@ -290,7 +286,7 @@ void logMessage(const String& msg) {
     }
 }
 
-// --- Preferences Storage Helpers ---
+// --- Preferences Storage Helpers (Only for Wi-Fi & MQTT Config, NO STATE SAVED) ---
 void loadConfig() {
     preferences.begin("config", false);
     stored_ssid = preferences.getString("ssid", DEFAULT_SSID);
@@ -315,19 +311,6 @@ void saveConfig(String ssid, String pass, String srv, int prt, String usr, Strin
     preferences.putString("tcmd", tCmd);
     preferences.putString("tstate", tState);
     preferences.end();
-}
-
-// --- State JSON Helper ---
-String getStateJSON() {
-    JsonDocument doc;
-    doc["POWER1"] = relayStates[0] ? "ON" : "OFF";
-    doc["POWER2"] = relayStates[1] ? "ON" : "OFF";
-    doc["POWER3"] = relayStates[2] ? "ON" : "OFF";
-    doc["POWER4"] = relayStates[3] ? "ON" : "OFF";
-    doc["Dimmer"] = dimmerValue;
-    String output;
-    serializeJson(doc, output);
-    return output;
 }
 
 // --- Wi-Fi & Connection Management ---
@@ -439,88 +422,32 @@ void reconnectMQTT() {
             if (mqttClient.connect(clientId.c_str(), mqtt_user.c_str(), mqtt_pass.c_str())) {
                 mqttClient.subscribe(mqtt_topic_cmd.c_str());
                 logMessage(">> MQTT Connected & Subscribed!");
-                broadcastState(); 
+                Serial.println("STATUS"); // Request sync status from slave on reconnect
             }
         }
     }
 }
 
-// --- Unified Command Dispatcher (Bridges Web UI/MQTT to Serial Slave) ---
+// --- Stateless Command Dispatcher (Forwards directly to Serial Slave) ---
 void handleCommand(const String& cmd) {
     String trimmedCmd = cmd;
     trimmedCmd.trim();
 
-    for (int i = 1; i <= 4; i++) {
-        if (trimmedCmd == "POWER" + String(i) + " ON") {
-            relayStates[i - 1] = true;
-            Serial.println("POWER" + String(i) + " ON");
-            logMessage(">> Relay " + String(i) + " -> ON");
-            broadcastState();
-            return;
-        } else if (trimmedCmd == "POWER" + String(i) + " OFF") {
-            relayStates[i - 1] = false;
-            Serial.println("POWER" + String(i) + " OFF");
-            logMessage(">> Relay " + String(i) + " -> OFF");
-            broadcastState();
-            return;
-        }
-    }
-
-    if (trimmedCmd.startsWith("DIMMER ")) {
-        dimmerValue = trimmedCmd.substring(7).toInt();
-        triacState = (dimmerValue > 0);
-        Serial.println(trimmedCmd);
-        logMessage(">> Dimmer set to: " + String(dimmerValue));
-        broadcastState();
-        return;
-    } else if (trimmedCmd == "DIMM_UP") {
-        if (dimmerValue < 9) dimmerValue++;
-        triacState = (dimmerValue > 0);
-        Serial.println("DIMMER " + String(dimmerValue));
-        logMessage(">> Dimmer set to: " + String(dimmerValue));
-        broadcastState();
-        return;
-    } else if (trimmedCmd == "DIMM_DN") {
-        if (dimmerValue > 0) dimmerValue--;
-        triacState = (dimmerValue > 0);
-        Serial.println("DIMMER " + String(dimmerValue));
-        logMessage(">> Dimmer set to: " + String(dimmerValue));
-        broadcastState();
-        return;
-    } else if (trimmedCmd == "ALL_ON") {
-        for (int i = 1; i <= 4; i++) relayStates[i - 1] = true;
-        dimmerValue = 9;
-        triacState = true;
-        Serial.println("ALL_ON");
-        logMessage(">> ALL_ON");
-        broadcastState();
-        return;
-    } else if (trimmedCmd == "ALL_OFF") {
-        for (int i = 1; i <= 4; i++) relayStates[i - 1] = false;
-        dimmerValue = 0;
-        triacState = false;
-        Serial.println("ALL_OFF");
-        logMessage(">> ALL_OFF");
-        broadcastState();
-        return;
-    } else if (trimmedCmd == "STATUS") {
-        logMessage(">> [STATUS REQUEST] Refreshing States...");
-        broadcastState();
-        logMessage("-> Relay 1: " + String(relayStates[0] ? "ON" : "OFF"));
-        logMessage("-> Relay 2: " + String(relayStates[1] ? "ON" : "OFF"));
-        logMessage("-> Relay 3: " + String(relayStates[2] ? "ON" : "OFF"));
-        logMessage("-> Relay 4: " + String(relayStates[3] ? "ON" : "OFF"));
-        logMessage("-> Fan Dimmer Level: " + String(dimmerValue) + " (Triac: " + String(triacState ? "ACTIVE" : "INACTIVE") + ")");
-        logMessage("-> MQTT Status: " + String(mqttClient.connected() ? "CONNECTED" : "DISCONNECTED"));
-        Serial.println("STATUS");
-        return;
-    }
-
+    // Forward command directly out via UART to slave device
     Serial.println(trimmedCmd);
-    broadcastState();
+    logMessage(">> UART TX -> " + trimmedCmd);
+
+    // Also publish command to MQTT command topic
+    JsonDocument cmdDoc;
+    cmdDoc["command"] = trimmedCmd;
+    String pubPayload;
+    serializeJson(cmdDoc, pubPayload);
+    if (mqttClient.connected()) {
+        mqttClient.publish(mqtt_topic_cmd.c_str(), pubPayload.c_str());
+    }
 }
 
-// --- Serial Batch Processing (Parsing feedback from slave device) ---
+// --- Serial Batch Processing (Receives state updates from slave EEPROM/runtime) ---
 void processBufferedSerial(const String& data) {
     String bufferCopy = data;
     bufferCopy.trim();
@@ -535,31 +462,17 @@ void processBufferedSerial(const String& data) {
         line.trim();
 
         if (line.length() > 0) {
-            logMessage(line);
+            logMessage("<< UART RX -> " + line);
+            
+            // Check if incoming line from slave is valid JSON state
             JsonDocument doc;
             DeserializationError error = deserializeJson(doc, line);
-            if (!error) {
-                bool updated = false;
-                for (int i = 1; i <= 4; i++) {
-                    String pKey = "POWER" + String(i);
-                    if (doc.containsKey(pKey)) {
-                        bool state = (doc[pKey].as<String>() == "ON");
-                        if (relayStates[i - 1] != state) {
-                            relayStates[i - 1] = state;
-                            updated = true;
-                        }
-                    }
-                }
-                if (doc.containsKey("Dimmer")) {
-                    int dVal = doc["Dimmer"].as<int>();
-                    if (dimmerValue != dVal) {
-                        dimmerValue = dVal;
-                        triacState = (dimmerValue > 0);
-                        updated = true;
-                    }
-                }
-                if (updated) {
-                    broadcastState();
+            if (!error && doc.containsKey("POWER1")) {
+                latestSlaveStateJson = line; // Cache raw JSON received from slave
+                
+                // Publish latest state to MQTT state topic
+                if (mqttClient.connected()) {
+                    mqttClient.publish(mqtt_topic_state.c_str(), latestSlaveStateJson.c_str());
                 }
             }
         }
@@ -567,17 +480,8 @@ void processBufferedSerial(const String& data) {
     }
 }
 
-// --- State Broadcast (MQTT & Serial) ---
-void broadcastState() {
-    String out = getStateJSON();
-    if (mqttClient.connected()) {
-        mqttClient.publish(mqtt_topic_state.c_str(), out.c_str());
-    }
-    logMessage(">> STATE BROADCAST: " + out);
-}
-
 bool sendPeriodicStatus(void*) {
-    broadcastState();
+    Serial.println("STATUS"); // Request periodic status sync from slave
     return true;
 }
 
@@ -609,7 +513,7 @@ void setup() {
 
     server.on("/", HTTP_GET, []() { server.send_P(200, "text/html", HTML_TEMPLATE); });
     server.on("/config", HTTP_GET, []() { server.send_P(200, "text/html", CONFIG_PAGE); });
-    server.on("/status-json", HTTP_GET, []() { server.send(200, "application/json", getStateJSON()); });
+    server.on("/status-json", HTTP_GET, []() { server.send(200, "application/json", latestSlaveStateJson); });
     server.on("/logs", HTTP_GET, []() {
         server.send(200, "text/plain", webLogBuffer);
         webLogBuffer = ""; // clear buffer after retrieval
@@ -618,7 +522,7 @@ void setup() {
         if (server.hasArg("action")) {
             handleCommand(server.arg("action"));
         }
-        server.send(200, "application/json", getStateJSON());
+        server.send(200, "application/json", latestSlaveStateJson);
     });
     server.on("/get-config", HTTP_GET, []() {
         JsonDocument doc;
