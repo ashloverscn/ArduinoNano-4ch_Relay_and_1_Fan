@@ -52,18 +52,21 @@ const unsigned long WIFI_RETRY_INTERVAL = 10000; // Check/retry every 10 seconds
 unsigned long wifiDisconnectedStartTime = 0;        // Tracks when Wi-Fi dropped
 const unsigned long WIFI_AP_FALLBACK_TIMEOUT = 600000; // 10 minutes (10 * 60 * 1000 ms)
 
-// --- GPIO 0 Long Press & AP Mode State ---
+// --- GPIO 0 Button & Press State ---
 const int CONFIG_BUTTON_PIN = 0;
 unsigned long buttonPressStartTime = 0;
 bool buttonStateLast = HIGH;
-const unsigned long LONG_PRESS_DURATION = 3000; // 3 seconds hold to trigger AP mode
+const unsigned long LONG_PRESS_DURATION = 3000;  // 3 seconds -> AP Mode
+const unsigned long VERY_LONG_PRESS_DURATION = 10000; // 10 seconds -> Factory Reset
 bool apModeActive = false;
+bool factoryResetTriggered = false;
+bool apTriggered = false;
 
 // Forward declarations
 void loadConfig();
 void saveConfig(String ssid, String pass, String srv, int prt, String usr, String pwd, String tCmd, String tState);
+void factoryReset();
 void broadcastState();
-void broadcastLog(const String& message);
 void logMessage(const String& msg);
 void handleCommand(const String& cmd);
 void processBufferedSerial(const String& data);
@@ -454,7 +457,7 @@ void loadConfig() {
 
 void saveConfig(String ssid, String pass, String srv, int prt, String usr, String pwd, String tCmd, String tState) {
     preferences.begin("config", false);
-    preferences.putBool("configured", true); // Flag configuration as saved
+    preferences.putBool("configured", true);
     preferences.putString("ssid", ssid);
     preferences.putString("password", pass);
     preferences.putString("server", srv);
@@ -464,6 +467,18 @@ void saveConfig(String ssid, String pass, String srv, int prt, String usr, Strin
     preferences.putString("tcmd", tCmd);
     preferences.putString("tstate", tState);
     preferences.end();
+}
+
+// --- Factory Reset Function (Wipes NVS Storage & Flags) ---
+void factoryReset() {
+    logMessage(">> FACTORY RESET: Clearing NVS Preferences...");
+    preferences.begin("config", false);
+    preferences.clear(); // Wipes all stored keys including configuration flag and credentials
+    preferences.end();
+    
+    logMessage(">> NVS Cleared! Restarting ESP32 into clean setup state...");
+    delay(1000);
+    ESP.restart();
 }
 
 // --- Verbose Console Logger ---
@@ -504,18 +519,34 @@ void checkWiFiConnection() {
     }
 }
 
-// --- GPIO 0 Long Press Detection ---
+// --- GPIO 0 Button Handling (3s AP Mode / 10s Factory Reset) ---
 void checkButton() {
     int currentState = digitalRead(CONFIG_BUTTON_PIN);
     
     if (currentState == LOW && buttonStateLast == HIGH) {
         buttonPressStartTime = millis();
         buttonStateLast = LOW;
+        factoryResetTriggered = false;
+        apTriggered = false;
     } 
     else if (currentState == LOW && buttonStateLast == LOW) {
-        if (!apModeActive && (millis() - buttonPressStartTime >= LONG_PRESS_DURATION)) {
-            logMessage(">> Long press detected on GPIO 0! Entering AP Configuration Mode...");
-            enterAPMode();
+        unsigned long holdDuration = millis() - buttonPressStartTime;
+        
+        // 10 Seconds -> Factory Reset (Clear NVS)
+        if (holdDuration >= VERY_LONG_PRESS_DURATION) {
+            if (!factoryResetTriggered) {
+                factoryResetTriggered = true;
+                logMessage(">> Very long press (10s) detected! Initiating Factory Reset...");
+                factoryReset();
+            }
+        }
+        // 3 Seconds -> Enter AP Configuration Mode
+        else if (holdDuration >= LONG_PRESS_DURATION && holdDuration < VERY_LONG_PRESS_DURATION) {
+            if (!apModeActive && !apTriggered) {
+                apTriggered = true;
+                logMessage(">> Long press (3s) detected! Entering AP Configuration Mode...");
+                enterAPMode();
+            }
         }
     } 
     else if (currentState == HIGH && buttonStateLast == LOW) {
@@ -852,7 +883,7 @@ void setup() {
     // 1. Load Stored Configurations & Check Configuration Flag
     loadConfig();
 
-    // Setup Web Server Routes (Needed for both AP mode and normal mode config pages)
+    // Setup Web Server Routes
     server.on("/", HTTP_GET, []() {
         server.send_P(200, "text/html", HTML_TEMPLATE);
     });
@@ -893,7 +924,7 @@ void setup() {
         ESP.restart();
     });
 
-    // 2. If first boot (not configured yet), enter AP Mode immediately
+    // 2. If not configured yet, enter AP Mode immediately
     if (!isConfigured) {
         Serial.println(">> First boot detected (Not configured). Entering AP Mode for initial setup...");
         enterAPMode();
@@ -925,7 +956,7 @@ void setup() {
 }
 
 void loop() {
-    // Continuously monitor GPIO 0 button for long press
+    // Continuously monitor GPIO 0 button for long press (3s) or very long press (10s)
     checkButton();
 
     if (apModeActive) {
