@@ -17,11 +17,10 @@ const char* DEFAULT_MQTT_SERVER = "i11b0026.ala.eu-central-1.emqxsl.com";
 const int   DEFAULT_MQTT_PORT = 8883;
 const char* DEFAULT_MQTT_USER = "admin";
 const char* DEFAULT_MQTT_PASS = "admin1234S";
-const char* DEFAULT_MQTT_TOPIC_CMD = "home/esp32/command";
-const char* DEFAULT_MQTT_TOPIC_STATE = "home/esp32/state";
+const char* DEFAULT_MQTT_TOPIC_CMD = "home/esp8266/command";
+const char* DEFAULT_MQTT_TOPIC_STATE = "home/esp8266/state";
 
 // --- Runtime Configuration Variables ---
-bool isConfigured = false;
 String stored_ssid;
 String stored_password;
 String mqtt_server;
@@ -52,21 +51,18 @@ const unsigned long WIFI_RETRY_INTERVAL = 10000; // Check/retry every 10 seconds
 unsigned long wifiDisconnectedStartTime = 0;        // Tracks when Wi-Fi dropped
 const unsigned long WIFI_AP_FALLBACK_TIMEOUT = 600000; // 10 minutes (10 * 60 * 1000 ms)
 
-// --- GPIO 0 Button & Press State ---
+// --- GPIO 0 Long Press & AP Mode State ---
 const int CONFIG_BUTTON_PIN = 0;
 unsigned long buttonPressStartTime = 0;
 bool buttonStateLast = HIGH;
-const unsigned long LONG_PRESS_DURATION = 3000;  // 3 seconds -> AP Mode
-const unsigned long VERY_LONG_PRESS_DURATION = 10000; // 10 seconds -> Factory Reset
+const unsigned long LONG_PRESS_DURATION = 3000; // 3 seconds hold to trigger AP mode
 bool apModeActive = false;
-bool factoryResetTriggered = false;
-bool apTriggered = false;
 
 // Forward declarations
 void loadConfig();
 void saveConfig(String ssid, String pass, String srv, int prt, String usr, String pwd, String tCmd, String tState);
-void factoryReset();
 void broadcastState();
+void broadcastLog(const String& message);
 void logMessage(const String& msg);
 void handleCommand(const String& cmd);
 void processBufferedSerial(const String& data);
@@ -237,7 +233,7 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
         ws = new WebSocket('ws://' + window.location.hostname + ':81/');
         
         ws.onopen = function(event) {
-            reconnectAttempts = 0;
+            reconnectAttempts = 0; // Reset counter on successful connection
             updateConnectionBanner(true);
             appendConsole("Connected to ESP32 WebSocket server.");
             sendCommand('STATUS');
@@ -245,6 +241,7 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
         
         ws.onclose = function(event) {
             updateConnectionBanner(false);
+            // Exponential backoff capped at 10 seconds to prevent flooding and UI lock
             let timeout = Math.min(1000 * Math.pow(1.5, reconnectAttempts), 10000);
             appendConsole(`Disconnected. Reconnecting in ${Math.round(timeout/1000)}s...`);
             setTimeout(initWebSocket, timeout);
@@ -273,7 +270,7 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
     function updateConnectionBanner(connected) {
         const banner = document.getElementById('connectionStatus');
         if (connected) {
-            banner.innerText = "Status: Connected ";
+            banner.innerText = "Status: Connected (ESP32 Direct)";
             banner.className = "status-connected";
         } else {
             banner.innerText = "Status: Disconnected";
@@ -443,7 +440,6 @@ const char CONFIG_PAGE[] PROGMEM = R"rawliteral(
 // --- Load and Save Configurations via Preferences ---
 void loadConfig() {
     preferences.begin("config", false);
-    isConfigured = preferences.getBool("configured", false);
     stored_ssid = preferences.getString("ssid", DEFAULT_SSID);
     stored_password = preferences.getString("password", DEFAULT_PASSWORD);
     mqtt_server = preferences.getString("server", DEFAULT_MQTT_SERVER);
@@ -457,7 +453,6 @@ void loadConfig() {
 
 void saveConfig(String ssid, String pass, String srv, int prt, String usr, String pwd, String tCmd, String tState) {
     preferences.begin("config", false);
-    preferences.putBool("configured", true);
     preferences.putString("ssid", ssid);
     preferences.putString("password", pass);
     preferences.putString("server", srv);
@@ -467,18 +462,6 @@ void saveConfig(String ssid, String pass, String srv, int prt, String usr, Strin
     preferences.putString("tcmd", tCmd);
     preferences.putString("tstate", tState);
     preferences.end();
-}
-
-// --- Factory Reset Function (Wipes NVS Storage & Flags) ---
-void factoryReset() {
-    logMessage(">> FACTORY RESET: Clearing NVS Preferences...");
-    preferences.begin("config", false);
-    preferences.clear(); // Wipes all stored keys including configuration flag and credentials
-    preferences.end();
-    
-    logMessage(">> NVS Cleared! Restarting ESP32 into clean setup state...");
-    delay(1000);
-    ESP.restart();
 }
 
 // --- Verbose Console Logger ---
@@ -496,7 +479,7 @@ void logMessage(const String& msg) {
 void checkWiFiConnection() {
     if (!apModeActive) {
         if (WiFi.status() == WL_CONNECTED) {
-            wifiDisconnectedStartTime = 0; 
+            wifiDisconnectedStartTime = 0; // Reset timer when connected
         } else {
             if (wifiDisconnectedStartTime == 0) {
                 wifiDisconnectedStartTime = millis();
@@ -519,34 +502,18 @@ void checkWiFiConnection() {
     }
 }
 
-// --- GPIO 0 Button Handling (3s AP Mode / 10s Factory Reset) ---
+// --- GPIO 0 Long Press Detection ---
 void checkButton() {
     int currentState = digitalRead(CONFIG_BUTTON_PIN);
     
     if (currentState == LOW && buttonStateLast == HIGH) {
         buttonPressStartTime = millis();
         buttonStateLast = LOW;
-        factoryResetTriggered = false;
-        apTriggered = false;
     } 
     else if (currentState == LOW && buttonStateLast == LOW) {
-        unsigned long holdDuration = millis() - buttonPressStartTime;
-        
-        // 10 Seconds -> Factory Reset (Clear NVS)
-        if (holdDuration >= VERY_LONG_PRESS_DURATION) {
-            if (!factoryResetTriggered) {
-                factoryResetTriggered = true;
-                logMessage(">> Very long press (10s) detected! Initiating Factory Reset...");
-                factoryReset();
-            }
-        }
-        // 3 Seconds -> Enter AP Configuration Mode
-        else if (holdDuration >= LONG_PRESS_DURATION && holdDuration < VERY_LONG_PRESS_DURATION) {
-            if (!apModeActive && !apTriggered) {
-                apTriggered = true;
-                logMessage(">> Long press (3s) detected! Entering AP Configuration Mode...");
-                enterAPMode();
-            }
+        if (!apModeActive && (millis() - buttonPressStartTime >= LONG_PRESS_DURATION)) {
+            logMessage(">> Long press detected on GPIO 0! Entering AP Configuration Mode...");
+            enterAPMode();
         }
     } 
     else if (currentState == HIGH && buttonStateLast == LOW) {
@@ -643,6 +610,7 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length) {
     
     logMessage("<< [MQTT Received on " + String(topic) + "]: " + message);
 
+    // Handle incoming commands from command topic
     if (String(topic) == mqtt_topic_cmd) {
         JsonDocument doc;
         DeserializationError error = deserializeJson(doc, message);
@@ -653,6 +621,7 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length) {
             handleCommand(message);
         }
     }
+    // Handle state updates from state topic
     else if (String(topic) == mqtt_topic_state) {
         JsonDocument doc;
         DeserializationError error = deserializeJson(doc, message);
@@ -686,7 +655,7 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length) {
 void reconnectMQTT() {
     if (!apModeActive && !mqttClient.connected() && WiFi.status() == WL_CONNECTED) {
         static unsigned long lastMqttRetry = 0;
-        if (millis() - lastMqttRetry > 10000) { 
+        if (millis() - lastMqttRetry > 10000) { // Changed to 10s to prevent starvation
             lastMqttRetry = millis();
             logMessage(">> Attempting MQTT connection...");
             String clientId = "ESP32Gateway-" + String((uint32_t)ESP.getEfuseMac(), HEX);
@@ -880,10 +849,27 @@ void setup() {
     // Initialize GPIO 0 button pin with internal pull-up
     pinMode(CONFIG_BUTTON_PIN, INPUT_PULLUP);
 
-    // 1. Load Stored Configurations & Check Configuration Flag
+    // 1. Load Stored Configurations (Wi-Fi + MQTT)
     loadConfig();
 
-    // Setup Web Server Routes
+    // 2. Wi-Fi Connect with stored credentials
+    WiFi.begin(stored_ssid.c_str(), stored_password.c_str());
+    
+    unsigned long startAttempt = millis();
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        if (millis() - startAttempt > 15000) {
+            break;
+        }
+    }
+
+    // 3. Configure Secure MQTT Client
+    espClient.setInsecure();
+    mqttClient.setServer(mqtt_server.c_str(), mqtt_port);
+    mqttClient.setCallback(callbackMQTT);
+    mqttClient.setBufferSize(512);
+
+    // 4. Setup Web Server Routes
     server.on("/", HTTP_GET, []() {
         server.send_P(200, "text/html", HTML_TEMPLATE);
     });
@@ -924,30 +910,6 @@ void setup() {
         ESP.restart();
     });
 
-    // 2. If not configured yet, enter AP Mode immediately
-    if (!isConfigured) {
-        Serial.println(">> First boot detected (Not configured). Entering AP Mode for initial setup...");
-        enterAPMode();
-        return;
-    }
-
-    // 3. Normal Wi-Fi Connect with stored credentials
-    WiFi.begin(stored_ssid.c_str(), stored_password.c_str());
-    
-    unsigned long startAttempt = millis();
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        if (millis() - startAttempt > 15000) {
-            break;
-        }
-    }
-
-    // 4. Configure Secure MQTT Client
-    espClient.setInsecure();
-    mqttClient.setServer(mqtt_server.c_str(), mqtt_port);
-    mqttClient.setCallback(callbackMQTT);
-    mqttClient.setBufferSize(512);
-
     server.begin();
 
     // 5. Start WebSocket Server
@@ -956,7 +918,7 @@ void setup() {
 }
 
 void loop() {
-    // Continuously monitor GPIO 0 button for long press (3s) or very long press (10s)
+    // Continuously monitor GPIO 0 button for long press
     checkButton();
 
     if (apModeActive) {
