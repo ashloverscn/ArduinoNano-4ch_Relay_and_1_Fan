@@ -17,8 +17,8 @@ const char* DEFAULT_MQTT_SERVER = "i11b0026.ala.eu-central-1.emqxsl.com";
 const int   DEFAULT_MQTT_PORT = 8883;
 const char* DEFAULT_MQTT_USER = "admin";
 const char* DEFAULT_MQTT_PASS = "admin1234S";
-const char* DEFAULT_MQTT_TOPIC_CMD = "home/esp8266/command";
-const char* DEFAULT_MQTT_TOPIC_STATE = "home/esp8266/state";
+const char* DEFAULT_MQTT_TOPIC_CMD = "home/esp32/command";
+const char* DEFAULT_MQTT_TOPIC_STATE = "home/esp32/state";
 
 // --- Runtime Configuration Variables ---
 String stored_ssid;
@@ -29,10 +29,6 @@ String mqtt_user;
 String mqtt_pass;
 String mqtt_topic_cmd;
 String mqtt_topic_state;
-
-// --- Controller State ---
-bool relayStates[4] = {false, false, false, false};
-int dimmerValue = 0; // 0 to 9
 
 // --- Modern Web Server, WebSocket & MQTT ---
 WebServer server(80);
@@ -47,22 +43,23 @@ const unsigned long SERIAL_TIMEOUT = 50;
 
 // --- Wi-Fi Reconnection & AP Fallback State ---
 unsigned long lastWiFiCheckTime = 0;
-const unsigned long WIFI_RETRY_INTERVAL = 10000; // Check/retry every 10 seconds
-unsigned long wifiDisconnectedStartTime = 0;        // Tracks when Wi-Fi dropped
-const unsigned long WIFI_AP_FALLBACK_TIMEOUT = 600000; // 10 minutes (10 * 60 * 1000 ms)
+const unsigned long WIFI_RETRY_INTERVAL = 10000; 
+unsigned long wifiDisconnectedStartTime = 0;        
+const unsigned long WIFI_AP_FALLBACK_TIMEOUT = 600000; // 10 minutes
 
-// --- GPIO 0 Long Press & AP Mode State ---
+// --- GPIO 0 Button Press States (3s AP Mode & 10s Factory Reset) ---
 const int CONFIG_BUTTON_PIN = 0;
 unsigned long buttonPressStartTime = 0;
 bool buttonStateLast = HIGH;
-const unsigned long LONG_PRESS_DURATION = 3000; // 3 seconds hold to trigger AP mode
+const unsigned long LONG_PRESS_DURATION = 3000;       // 3 seconds for AP Mode
+const unsigned long VERY_LONG_PRESS_DURATION = 10000; // 10 seconds for NVS Factory Reset
+bool apTriggered = false;
+bool factoryResetTriggered = false;
 bool apModeActive = false;
 
 // Forward declarations
 void loadConfig();
 void saveConfig(String ssid, String pass, String srv, int prt, String usr, String pwd, String tCmd, String tState);
-void broadcastState();
-void broadcastLog(const String& message);
 void logMessage(const String& msg);
 void handleCommand(const String& cmd);
 void processBufferedSerial(const String& data);
@@ -72,14 +69,14 @@ void checkWiFiConnection();
 void checkButton();
 void enterAPMode();
 
-// --- HTML Template (Dashboard with Exponential Backoff WS) ---
+// --- HTML Template (Dashboard) ---
 const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ESP32 Home Automation Web Controller</title>
+    <title>Home Automation Controller</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -176,17 +173,17 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
 
 <div class="container">
     <a href="/config" class="config-link">⚙️ Config</a>
-    <h2>ESP32 Home Automation</h2>
+    <h2>Home Automation Controller</h2>
 
     <!-- Connection Status Banner -->
     <div class="card">
-        <div class="card-title">ESP32 Status</div>
+        <div class="card-title">ESP32 Gateway Status</div>
         <div id="connectionStatus" class="status-disconnected">Status: Connecting...</div>
     </div>
 
     <!-- Relays Control -->
     <div class="card">
-        <div class="card-title">Relay Controls</div>
+        <div class="card-title">Relay Controls (Bridged)</div>
         <div class="relay-grid">
             <button id="relay-1" class="relay-btn" onclick="toggleRelay(1)">Relay 1<br>OFF</button>
             <button id="relay-2" class="relay-btn" onclick="toggleRelay(2)">Relay 2<br>OFF</button>
@@ -199,11 +196,11 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
     <div class="card">
         <div class="card-title">Dimmer Control (0-9)</div>
         <div class="row">
-            <button onclick="sendCommand('DIMMER 0')">MIN (0)</button>
+            <button onclick="sendCommand('DIMMER:0')">MIN (0)</button>
             <button onclick="sendCommand('DIMM_DN')">Step -</button>
             <input type="range" id="dimmerSlider" class="flex-fill" min="0" max="9" value="0" onchange="onSliderChange(this.value)">
             <button onclick="sendCommand('DIMM_UP')">Step +</button>
-            <button onclick="sendCommand('DIMMER 9')">MAX (9)</button>
+            <button onclick="sendCommand('DIMMER:9')">MAX (9)</button>
         </div>
     </div>
 
@@ -233,7 +230,7 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
         ws = new WebSocket('ws://' + window.location.hostname + ':81/');
         
         ws.onopen = function(event) {
-            reconnectAttempts = 0; // Reset counter on successful connection
+            reconnectAttempts = 0;
             updateConnectionBanner(true);
             appendConsole("Connected to ESP32 WebSocket server.");
             sendCommand('STATUS');
@@ -241,7 +238,6 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
         
         ws.onclose = function(event) {
             updateConnectionBanner(false);
-            // Exponential backoff capped at 10 seconds to prevent flooding and UI lock
             let timeout = Math.min(1000 * Math.pow(1.5, reconnectAttempts), 10000);
             appendConsole(`Disconnected. Reconnecting in ${Math.round(timeout/1000)}s...`);
             setTimeout(initWebSocket, timeout);
@@ -253,12 +249,13 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
                 const data = JSON.parse(event.data);
                 if (data.type === 'console_log') {
                     appendConsole(data.message);
-                } else if (data.type === 'state_update') {
-                    if (data.relays) {
-                        data.relays.forEach((state, i) => updateRelayUI(i + 1, state));
-                    }
-                    if (data.dimmer !== undefined) {
-                        document.getElementById('dimmerSlider').value = data.dimmer;
+                } else {
+                    if (data.POWER1 !== undefined) updateRelayUI(1, data.POWER1 === 'ON');
+                    if (data.POWER2 !== undefined) updateRelayUI(2, data.POWER2 === 'ON');
+                    if (data.POWER3 !== undefined) updateRelayUI(3, data.POWER3 === 'ON');
+                    if (data.POWER4 !== undefined) updateRelayUI(4, data.POWER4 === 'ON');
+                    if (data.Dimmer !== undefined) {
+                        document.getElementById('dimmerSlider').value = data.Dimmer;
                     }
                 }
             } catch (e) {
@@ -270,7 +267,7 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
     function updateConnectionBanner(connected) {
         const banner = document.getElementById('connectionStatus');
         if (connected) {
-            banner.innerText = "Status: Connected (ESP32 Direct)";
+            banner.innerText = "Status: Connected";
             banner.className = "status-connected";
         } else {
             banner.innerText = "Status: Disconnected";
@@ -284,7 +281,7 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
     }
 
     function onSliderChange(val) {
-        sendCommand(`DIMMER ${val}`);
+        sendCommand(`DIMMER:${val}`);
     }
 
     function sendCommand(cmd) {
@@ -318,7 +315,7 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
-// --- Dedicated Wi-Fi & MQTT Configuration Page HTML ---
+// --- Configuration Page HTML ---
 const char CONFIG_PAGE[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="en">
@@ -479,7 +476,7 @@ void logMessage(const String& msg) {
 void checkWiFiConnection() {
     if (!apModeActive) {
         if (WiFi.status() == WL_CONNECTED) {
-            wifiDisconnectedStartTime = 0; // Reset timer when connected
+            wifiDisconnectedStartTime = 0; 
         } else {
             if (wifiDisconnectedStartTime == 0) {
                 wifiDisconnectedStartTime = millis();
@@ -502,17 +499,36 @@ void checkWiFiConnection() {
     }
 }
 
-// --- GPIO 0 Long Press Detection ---
+// --- GPIO 0 Button Handler (3s AP Mode & 10s Factory Reset) ---
 void checkButton() {
     int currentState = digitalRead(CONFIG_BUTTON_PIN);
     
     if (currentState == LOW && buttonStateLast == HIGH) {
         buttonPressStartTime = millis();
         buttonStateLast = LOW;
+        apTriggered = false;
+        factoryResetTriggered = false;
     } 
     else if (currentState == LOW && buttonStateLast == LOW) {
-        if (!apModeActive && (millis() - buttonPressStartTime >= LONG_PRESS_DURATION)) {
-            logMessage(">> Long press detected on GPIO 0! Entering AP Configuration Mode...");
+        unsigned long heldTime = millis() - buttonPressStartTime;
+        
+        // 10-Second Very Long Press: Erase NVS / Factory Reset
+        if (heldTime >= VERY_LONG_PRESS_DURATION && !factoryResetTriggered) {
+            factoryResetTriggered = true;
+            logMessage(">> [FACTORY RESET] 10s Very Long Press detected! Erasing NVS storage...");
+            
+            preferences.begin("config", false);
+            preferences.clear();
+            preferences.end();
+            
+            logMessage(">> NVS erased successfully. Restarting as fresh first-boot device...");
+            delay(1500);
+            ESP.restart();
+        }
+        // 3-Second Long Press: Enter AP Configuration Mode
+        else if (heldTime >= LONG_PRESS_DURATION && heldTime < VERY_LONG_PRESS_DURATION && !apTriggered && !apModeActive) {
+            apTriggered = true;
+            logMessage(">> 3s Long Press detected! Entering AP Configuration Mode...");
             enterAPMode();
         }
     } 
@@ -584,7 +600,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
         case WStype_DISCONNECTED:
             break;
         case WStype_CONNECTED:
-            broadcastState();
+            Serial.println("STATUS");
             break;
         case WStype_TEXT: {
             JsonDocument doc;
@@ -600,7 +616,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
     }
 }
 
-// --- MQTT Callback for Inbound Commands & State Sync ---
+// --- MQTT Callback for Inbound Commands ---
 void callbackMQTT(char* topic, byte* payload, unsigned int length) {
     String message;
     for (unsigned int i = 0; i < length; i++) {
@@ -610,7 +626,6 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length) {
     
     logMessage("<< [MQTT Received on " + String(topic) + "]: " + message);
 
-    // Handle incoming commands from command topic
     if (String(topic) == mqtt_topic_cmd) {
         JsonDocument doc;
         DeserializationError error = deserializeJson(doc, message);
@@ -621,48 +636,19 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length) {
             handleCommand(message);
         }
     }
-    // Handle state updates from state topic
-    else if (String(topic) == mqtt_topic_state) {
-        JsonDocument doc;
-        DeserializationError error = deserializeJson(doc, message);
-        if (!error && doc["type"] == "state_update") {
-            bool changed = false;
-            if (doc.containsKey("relays")) {
-                JsonArray relays = doc["relays"];
-                for (int i = 0; i < 4; i++) {
-                    bool val = relays[i];
-                    if (relayStates[i] != val) {
-                        relayStates[i] = val;
-                        changed = true;
-                    }
-                }
-            }
-            if (doc.containsKey("dimmer")) {
-                int dim = doc["dimmer"];
-                if (dimmerValue != dim) {
-                    dimmerValue = dim;
-                    changed = true;
-                }
-            }
-            if (changed) {
-                broadcastState();
-            }
-        }
-    }
 }
 
-// --- Reconnect MQTT (Non-blocking with 10s backoff interval) ---
+// --- Reconnect MQTT ---
 void reconnectMQTT() {
     if (!apModeActive && !mqttClient.connected() && WiFi.status() == WL_CONNECTED) {
         static unsigned long lastMqttRetry = 0;
-        if (millis() - lastMqttRetry > 10000) { // Changed to 10s to prevent starvation
+        if (millis() - lastMqttRetry > 10000) { 
             lastMqttRetry = millis();
             logMessage(">> Attempting MQTT connection...");
             String clientId = "ESP32Gateway-" + String((uint32_t)ESP.getEfuseMac(), HEX);
             if (mqttClient.connect(clientId.c_str(), mqtt_user.c_str(), mqtt_pass.c_str())) {
                 logMessage(">> MQTT Connected!");
                 mqttClient.subscribe(mqtt_topic_cmd.c_str());
-                mqttClient.subscribe(mqtt_topic_state.c_str());
             } else {
                 logMessage(">> MQTT Connection failed, rc=" + String(mqttClient.state()) + ". Retrying later...");
             }
@@ -670,7 +656,7 @@ void reconnectMQTT() {
     }
 }
 
-// --- Translate Web UI / MQTT Actions and Append STATUS ---
+// --- Bridge Command Dispatcher ---
 void handleCommand(const String& cmd) {
     String trimmedCmd = cmd;
     trimmedCmd.trim();
@@ -681,101 +667,15 @@ void handleCommand(const String& cmd) {
     serializeJson(cmdDoc, pubPayload);
     mqttClient.publish(mqtt_topic_cmd.c_str(), pubPayload.c_str());
 
-    for (int i = 1; i <= 4; i++) {
-        if (trimmedCmd == "POWER" + String(i) + " ON") {
-            relayStates[i - 1] = true;
-            String jsonOut = "{\"POWER" + String(i) + "\":\"ON\"}";
-            Serial.println(jsonOut);
-            logMessage(">> " + jsonOut);
-            delay(10);
-            Serial.println("STATUS");
-            logMessage(">> STATUS");
-            broadcastState();
-            return;
-        } else if (trimmedCmd == "POWER" + String(i) + " OFF") {
-            relayStates[i - 1] = false;
-            String jsonOut = "{\"POWER" + String(i) + "\":\"OFF\"}";
-            Serial.println(jsonOut);
-            logMessage(">> " + jsonOut);
-            delay(10);
-            Serial.println("STATUS");
-            logMessage(">> STATUS");
-            broadcastState();
-            return;
-        }
-    }
-
-    if (trimmedCmd.startsWith("DIMMER ")) {
-        dimmerValue = trimmedCmd.substring(7).toInt();
-        String jsonOut = "{\"Dimmer\":" + String(dimmerValue) + "}";
-        Serial.println(jsonOut);
-        logMessage(">> " + jsonOut);
-    } else if (trimmedCmd == "DIMM_UP") {
-        if (dimmerValue < 9) dimmerValue++;
-        String jsonOut = "{\"Dimmer\":" + String(dimmerValue) + "}";
-        Serial.println(jsonOut);
-        logMessage(">> " + jsonOut);
-    } else if (trimmedCmd == "DIMM_DN") {
-        if (dimmerValue > 0) dimmerValue--;
-        String jsonOut = "{\"Dimmer\":" + String(dimmerValue) + "}";
-        Serial.println(jsonOut);
-        logMessage(">> " + jsonOut);
-    } else if (trimmedCmd == "ALL_ON") {
-        for (int i = 0; i < 4; i++) {
-            relayStates[i] = true;
-            String jsonOut = "{\"POWER" + String(i + 1) + "\":\"ON\"}";
-            Serial.println(jsonOut);
-            logMessage(">> " + jsonOut);
-            delay(15);
-        }
-        dimmerValue = 9;
-        String dimOut = "{\"Dimmer\":9}";
-        Serial.println(dimOut);
-        logMessage(">> " + dimOut);
-        delay(15);
-        Serial.println("STATUS");
-        logMessage(">> STATUS");
-        broadcastState();
-        return;
-    } else if (trimmedCmd == "ALL_OFF") {
-        for (int i = 0; i < 4; i++) {
-            relayStates[i] = false;
-            String jsonOut = "{\"POWER" + String(i + 1) + "\":\"OFF\"}";
-            Serial.println(jsonOut);
-            logMessage(">> " + jsonOut);
-            delay(15);
-        }
-        dimmerValue = 0;
-        String dimOut = "{\"Dimmer\":0}";
-        Serial.println(dimOut);
-        logMessage(">> " + dimOut);
-        delay(15);
-        Serial.println("STATUS");
-        logMessage(">> STATUS");
-        broadcastState();
-        return;
-    } else if (trimmedCmd == "STATUS") {
-        Serial.println("STATUS");
-        logMessage(">> STATUS");
-        broadcastState();
-        return;
-    }
-
-    broadcastState();
-    delay(10);
-    Serial.println("STATUS");
-    logMessage(">> STATUS");
+    Serial.println(trimmedCmd);
+    logMessage(">> [Serial Sent to Slave]: " + trimmedCmd);
 }
 
-// --- Pre-Buffer and Process Serial Batch at Transmission End (50ms Silence) ---
+// --- Serial Batch Parser (50ms Silence Timeout) ---
 void processBufferedSerial(const String& data) {
     String bufferCopy = data;
     bufferCopy.trim();
     if (bufferCopy.length() == 0) return;
-
-    logMessage("<< [Batch Received]");
-
-    bool stateChanged = false;
 
     int startIdx = 0;
     while (startIdx < (int)bufferCopy.length()) {
@@ -786,75 +686,31 @@ void processBufferedSerial(const String& data) {
         line.trim();
 
         if (line.length() > 0) {
-            if (line.startsWith("POWER") || line.startsWith("DIMMER") || line == "DIMM_UP" || line == "DIMM_DN" || line == "ALL_ON" || line == "ALL_OFF" || line == "STATUS") {
-                handleCommand(line);
-            } 
-            else {
-                JsonDocument doc;
-                DeserializationError error = deserializeJson(doc, line);
-                if (!error) {
-                    for (int i = 1; i <= 4; i++) {
-                        String key = "POWER" + String(i);
-                        if (doc.containsKey(key)) {
-                            bool isOn = (doc[key].as<String>() == "ON");
-                            if (relayStates[i - 1] != isOn) {
-                                relayStates[i - 1] = isOn;
-                                stateChanged = true;
-                            }
-                        }
-                    }
-
-                    if (doc.containsKey("Dimmer")) {
-                        int dimVal = doc["Dimmer"].as<int>();
-                        if (dimmerValue != dimVal) {
-                            dimmerValue = dimVal;
-                            stateChanged = true;
-                        }
-                    }
+            JsonDocument doc;
+            DeserializationError error = deserializeJson(doc, line);
+            if (!error) {
+                webSocket.broadcastTXT(line);
+                if (mqttClient.connected()) {
+                    mqttClient.publish(mqtt_topic_state.c_str(), line.c_str());
                 }
+            } else {
+                logMessage(line);
             }
         }
         startIdx = nextNewline + 1;
     }
-
-    if (stateChanged) {
-        broadcastState();
-    }
 }
 
-// --- Broadcast Helpers ---
-void broadcastState() {
-    JsonDocument doc;
-    doc["type"] = "state_update";
-    JsonArray relays = doc["relays"].to<JsonArray>();
-    for (int i = 0; i < 4; i++) {
-        relays.add(relayStates[i]);
-    }
-    doc["dimmer"] = dimmerValue;
-
-    String output;
-    serializeJson(doc, output);
-    webSocket.broadcastTXT(output);
-
-    if (mqttClient.connected()) {
-        mqttClient.publish(mqtt_topic_state.c_str(), output.c_str());
-    }
-}
-
-// --- Setup & Loop ---
+// --- Setup ---
 void setup() {
     Serial.begin(115200);
     delay(1000);
 
-    // Initialize GPIO 0 button pin with internal pull-up
     pinMode(CONFIG_BUTTON_PIN, INPUT_PULLUP);
 
-    // 1. Load Stored Configurations (Wi-Fi + MQTT)
     loadConfig();
 
-    // 2. Wi-Fi Connect with stored credentials
     WiFi.begin(stored_ssid.c_str(), stored_password.c_str());
-    
     unsigned long startAttempt = millis();
     while (WiFi.status() != WL_CONNECTED) {
         delay(500);
@@ -863,13 +719,11 @@ void setup() {
         }
     }
 
-    // 3. Configure Secure MQTT Client
     espClient.setInsecure();
     mqttClient.setServer(mqtt_server.c_str(), mqtt_port);
     mqttClient.setCallback(callbackMQTT);
     mqttClient.setBufferSize(512);
 
-    // 4. Setup Web Server Routes
     server.on("/", HTTP_GET, []() {
         server.send_P(200, "text/html", HTML_TEMPLATE);
     });
@@ -912,21 +766,19 @@ void setup() {
 
     server.begin();
 
-    // 5. Start WebSocket Server
     webSocket.begin();
     webSocket.onEvent(webSocketEvent);
 }
 
+// --- Main Loop ---
 void loop() {
-    // Continuously monitor GPIO 0 button for long press
     checkButton();
 
     if (apModeActive) {
         server.handleClient();
-        return; // In AP mode, only handle web server configuration
+        return;
     }
 
-    // Ensure Wi-Fi stays connected (retries endlessly for 10 mins before AP fallback)
     checkWiFiConnection();
 
     if (!mqttClient.connected()) {
