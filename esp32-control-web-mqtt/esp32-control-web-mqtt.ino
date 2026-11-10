@@ -668,7 +668,7 @@ void handleCommand(const String& cmd) {
     mqttClient.publish(mqtt_topic_cmd.c_str(), pubPayload.c_str());
 
     Serial.println(trimmedCmd);
-    logMessage(">> [Serial Sent to Slave]: " + trimmedCmd);
+    logMessage(">> " + trimmedCmd);
 }
 
 // --- Serial Batch Parser (50ms Silence Timeout) ---
