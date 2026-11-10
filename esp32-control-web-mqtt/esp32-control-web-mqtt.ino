@@ -21,6 +21,7 @@ const char* DEFAULT_MQTT_TOPIC_CMD = "home/esp32/command";
 const char* DEFAULT_MQTT_TOPIC_STATE = "home/esp32/state";
 
 // --- Runtime Configuration Variables ---
+bool isConfigured = false;
 String stored_ssid;
 String stored_password;
 String mqtt_server;
@@ -233,7 +234,7 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
         ws = new WebSocket('ws://' + window.location.hostname + ':81/');
         
         ws.onopen = function(event) {
-            reconnectAttempts = 0; // Reset counter on successful connection
+            reconnectAttempts = 0;
             updateConnectionBanner(true);
             appendConsole("Connected to ESP32 WebSocket server.");
             sendCommand('STATUS');
@@ -241,7 +242,6 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
         
         ws.onclose = function(event) {
             updateConnectionBanner(false);
-            // Exponential backoff capped at 10 seconds to prevent flooding and UI lock
             let timeout = Math.min(1000 * Math.pow(1.5, reconnectAttempts), 10000);
             appendConsole(`Disconnected. Reconnecting in ${Math.round(timeout/1000)}s...`);
             setTimeout(initWebSocket, timeout);
@@ -440,6 +440,7 @@ const char CONFIG_PAGE[] PROGMEM = R"rawliteral(
 // --- Load and Save Configurations via Preferences ---
 void loadConfig() {
     preferences.begin("config", false);
+    isConfigured = preferences.getBool("configured", false);
     stored_ssid = preferences.getString("ssid", DEFAULT_SSID);
     stored_password = preferences.getString("password", DEFAULT_PASSWORD);
     mqtt_server = preferences.getString("server", DEFAULT_MQTT_SERVER);
@@ -453,6 +454,7 @@ void loadConfig() {
 
 void saveConfig(String ssid, String pass, String srv, int prt, String usr, String pwd, String tCmd, String tState) {
     preferences.begin("config", false);
+    preferences.putBool("configured", true); // Flag configuration as saved
     preferences.putString("ssid", ssid);
     preferences.putString("password", pass);
     preferences.putString("server", srv);
@@ -479,7 +481,7 @@ void logMessage(const String& msg) {
 void checkWiFiConnection() {
     if (!apModeActive) {
         if (WiFi.status() == WL_CONNECTED) {
-            wifiDisconnectedStartTime = 0; // Reset timer when connected
+            wifiDisconnectedStartTime = 0; 
         } else {
             if (wifiDisconnectedStartTime == 0) {
                 wifiDisconnectedStartTime = millis();
@@ -610,7 +612,6 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length) {
     
     logMessage("<< [MQTT Received on " + String(topic) + "]: " + message);
 
-    // Handle incoming commands from command topic
     if (String(topic) == mqtt_topic_cmd) {
         JsonDocument doc;
         DeserializationError error = deserializeJson(doc, message);
@@ -621,7 +622,6 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length) {
             handleCommand(message);
         }
     }
-    // Handle state updates from state topic
     else if (String(topic) == mqtt_topic_state) {
         JsonDocument doc;
         DeserializationError error = deserializeJson(doc, message);
@@ -655,7 +655,7 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length) {
 void reconnectMQTT() {
     if (!apModeActive && !mqttClient.connected() && WiFi.status() == WL_CONNECTED) {
         static unsigned long lastMqttRetry = 0;
-        if (millis() - lastMqttRetry > 10000) { // Changed to 10s to prevent starvation
+        if (millis() - lastMqttRetry > 10000) { 
             lastMqttRetry = millis();
             logMessage(">> Attempting MQTT connection...");
             String clientId = "ESP32Gateway-" + String((uint32_t)ESP.getEfuseMac(), HEX);
@@ -849,27 +849,10 @@ void setup() {
     // Initialize GPIO 0 button pin with internal pull-up
     pinMode(CONFIG_BUTTON_PIN, INPUT_PULLUP);
 
-    // 1. Load Stored Configurations (Wi-Fi + MQTT)
+    // 1. Load Stored Configurations & Check Configuration Flag
     loadConfig();
 
-    // 2. Wi-Fi Connect with stored credentials
-    WiFi.begin(stored_ssid.c_str(), stored_password.c_str());
-    
-    unsigned long startAttempt = millis();
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        if (millis() - startAttempt > 15000) {
-            break;
-        }
-    }
-
-    // 3. Configure Secure MQTT Client
-    espClient.setInsecure();
-    mqttClient.setServer(mqtt_server.c_str(), mqtt_port);
-    mqttClient.setCallback(callbackMQTT);
-    mqttClient.setBufferSize(512);
-
-    // 4. Setup Web Server Routes
+    // Setup Web Server Routes (Needed for both AP mode and normal mode config pages)
     server.on("/", HTTP_GET, []() {
         server.send_P(200, "text/html", HTML_TEMPLATE);
     });
@@ -909,6 +892,30 @@ void setup() {
         delay(1000);
         ESP.restart();
     });
+
+    // 2. If first boot (not configured yet), enter AP Mode immediately
+    if (!isConfigured) {
+        Serial.println(">> First boot detected (Not configured). Entering AP Mode for initial setup...");
+        enterAPMode();
+        return;
+    }
+
+    // 3. Normal Wi-Fi Connect with stored credentials
+    WiFi.begin(stored_ssid.c_str(), stored_password.c_str());
+    
+    unsigned long startAttempt = millis();
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        if (millis() - startAttempt > 15000) {
+            break;
+        }
+    }
+
+    // 4. Configure Secure MQTT Client
+    espClient.setInsecure();
+    mqttClient.setServer(mqtt_server.c_str(), mqtt_port);
+    mqttClient.setCallback(callbackMQTT);
+    mqttClient.setBufferSize(512);
 
     server.begin();
 
