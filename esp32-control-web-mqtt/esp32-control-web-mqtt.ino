@@ -197,9 +197,9 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
         <div class="card-title">Dimmer Control (0-9)</div>
         <div class="row">
             <button onclick="sendCommand('DIMMER:0')">MIN (0)</button>
-            <button onclick="sendCommand('DIMM_DN')">Step -</button>
+            <button onclick="stepDimmer(-1)">Step -</button>
             <input type="range" id="dimmerSlider" class="flex-fill" min="0" max="9" value="0" onchange="onSliderChange(this.value)">
-            <button onclick="sendCommand('DIMM_UP')">Step +</button>
+            <button onclick="stepDimmer(1)">Step +</button>
             <button onclick="sendCommand('DIMMER:9')">MAX (9)</button>
         </div>
     </div>
@@ -282,6 +282,15 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
 
     function onSliderChange(val) {
         sendCommand(`DIMMER:${val}`);
+    }
+
+    function stepDimmer(direction) {
+        const slider = document.getElementById('dimmerSlider');
+        let newVal = parseInt(slider.value) + direction;
+        if (newVal < 0) newVal = 0;
+        if (newVal > 9) newVal = 9;
+        slider.value = newVal;
+        sendCommand(`DIMMER:${newVal}`);
     }
 
     function sendCommand(cmd) {
