@@ -26,7 +26,7 @@ auto timer = timer_create_default();
 #define RelayPin2 6
 #define RelayPin3 7
 #define RelayPin4 8
-#define TriacPin  9
+#define TriacPin 9
 #define BuzzerPin 4    // Buzzer connected to Digital Pin 4
 
 #define SwitchPin1 A0
@@ -37,7 +37,7 @@ auto timer = timer_create_default();
 #define SwitchPin6 A5
 
 #define ZeroCrossPin 2
-#define IR_RECV_PIN  3
+#define IR_RECV_PIN 3
 
 #define IR_Button_1    0xF50A7F80
 #define IR_Button_2    0xE41B7F80
@@ -91,9 +91,17 @@ void sendDimmerStatus();
 bool sendPeriodicStatus(void*);
 void setDimmerLevel(uint8_t val);
 
-// Helper function for buzzer feedback
+// Helper function for single buzzer feedback
 void beep(unsigned int frequency, unsigned long duration)
 {
+  tone(BuzzerPin, frequency, duration);
+}
+
+// Helper function for double buzzer feedback (when state/value is already matched)
+void doubleBeep(unsigned int frequency, unsigned long duration)
+{
+  tone(BuzzerPin, frequency, duration);
+  delay(duration + 40);
   tone(BuzzerPin, frequency, duration);
 }
 
@@ -123,8 +131,20 @@ void triacOn()
   }
   
   applyDimmer();
-  EEPROM.update(EEPROM_DIMMER, dimm_value);
-  EEPROM.update(EEPROM_TRIAC_STATE, 1);
+  
+  bool stateChanged = false;
+  if (EEPROM.read(EEPROM_DIMMER) != dimm_value || EEPROM.read(EEPROM_TRIAC_STATE) != 1)
+  {
+    EEPROM.update(EEPROM_DIMMER, dimm_value);
+    EEPROM.update(EEPROM_TRIAC_STATE, 1);
+    stateChanged = true;
+  }
+  
+  if (stateChanged)
+  {
+    beep(2500, 35);
+  }
+
   sendDimmerStatus();
   sendPeriodicStatus(nullptr);
 }
@@ -134,8 +154,20 @@ void triacOff()
   triacState = false;
   dimm_value = DIMMER_MIN; 
   atmega328_16mhz_ac_phase_control.set_ac_power(19500); // Fully OFF
-  EEPROM.update(EEPROM_DIMMER, dimm_value);
-  EEPROM.update(EEPROM_TRIAC_STATE, 0);
+  
+  bool stateChanged = false;
+  if (EEPROM.read(EEPROM_DIMMER) != dimm_value || EEPROM.read(EEPROM_TRIAC_STATE) != 0)
+  {
+    EEPROM.update(EEPROM_DIMMER, dimm_value);
+    EEPROM.update(EEPROM_TRIAC_STATE, 0);
+    stateChanged = true;
+  }
+  
+  if (stateChanged)
+  {
+    beep(2500, 35);
+  }
+
   sendDimmerStatus();
   sendPeriodicStatus(nullptr);
 }
@@ -154,34 +186,73 @@ void dimm_Up()
     return; 
   }
   
-  if (dimm_value < DIMMER_MAX) { dimm_value++; }
-  applyDimmer();
-  EEPROM.update(EEPROM_DIMMER, dimm_value);
-  sendDimmerStatus();
-  sendPeriodicStatus(nullptr);
+  if (dimm_value < DIMMER_MAX) 
+  { 
+    dimm_value++; 
+    applyDimmer();
+    
+    if (EEPROM.read(EEPROM_DIMMER) != dimm_value)
+    {
+      EEPROM.update(EEPROM_DIMMER, dimm_value);
+      beep(2500, 35);
+    }
+    
+    sendDimmerStatus();
+    sendPeriodicStatus(nullptr);
+  }
 }
 
 void dimm_Dn()
 {
   if (!triacState) return;
-  if (dimm_value > DIMMER_MIN) { dimm_value--; }
-  applyDimmer();
-  EEPROM.update(EEPROM_DIMMER, dimm_value);
-  sendDimmerStatus();
-  sendPeriodicStatus(nullptr);
+  if (dimm_value > DIMMER_MIN) 
+  { 
+    dimm_value--; 
+    applyDimmer();
+    
+    if (EEPROM.read(EEPROM_DIMMER) != dimm_value)
+    {
+      EEPROM.update(EEPROM_DIMMER, dimm_value);
+      beep(2500, 35);
+    }
+    
+    sendDimmerStatus();
+    sendPeriodicStatus(nullptr);
+  }
 }
 
 void setDimmerLevel(uint8_t val)
 {
   if (val > DIMMER_MAX) val = DIMMER_MAX;
+  
+  uint8_t old_dimm = dimm_value;
+  bool old_triac = triacState;
+
   dimm_value = val;
   triacState = (dimm_value > 0);
   applyDimmer();
-  EEPROM.update(EEPROM_DIMMER, dimm_value);
-  EEPROM.update(EEPROM_TRIAC_STATE, triacState ? 1 : 0);
+  
+  uint8_t newTriacState = triacState ? 1 : 0;
+  bool stateChanged = false;
+  
+  if (EEPROM.read(EEPROM_DIMMER) != dimm_value || EEPROM.read(EEPROM_TRIAC_STATE) != newTriacState)
+  {
+    EEPROM.update(EEPROM_DIMMER, dimm_value);
+    EEPROM.update(EEPROM_TRIAC_STATE, newTriacState);
+    stateChanged = true;
+  }
+  
+  if (stateChanged)
+  {
+    beep(2500, 35);      // Single beep when dimmer level actually changes
+  }
+  else
+  {
+    doubleBeep(2500, 35); // Double beep if sent the exact same dimmer value already active
+  }
+
   sendDimmerStatus();
   sendPeriodicStatus(nullptr);
-  beep(2500, 35); // Buzzer click feedback for dimmer change
 }
 
 void setRelayState(int relay, bool turnOn)
@@ -198,11 +269,27 @@ void setRelayState(int relay, bool turnOn)
     default: return;
   }
 
+  uint8_t targetEepromVal = turnOn ? HIGH : LOW;
   digitalWrite(pin, turnOn ? LOW : HIGH);
-  EEPROM.update(eepromAddress, turnOn ? HIGH : LOW);
+  
+  bool stateChanged = false;
+  if (EEPROM.read(eepromAddress) != targetEepromVal)
+  {
+    EEPROM.update(eepromAddress, targetEepromVal);
+    stateChanged = true;
+  }
+  
+  if (stateChanged)
+  {
+    beep(2000, 30);      // Single beep when relay state actually changes
+  }
+  else
+  {
+    doubleBeep(2000, 30); // Double beep if relay is already in the requested state
+  }
+
   sendTasmotaStatus(relay, turnOn);
   sendPeriodicStatus(nullptr);
-  beep(2000, 30); // Buzzer click feedback for relay toggle
   delay(50);
 }
 
@@ -413,6 +500,7 @@ void handleWallSwitches()
         if (i < 4)
         {
           // Switches 1 to 4: Standard wall latching switches (SPDT toggle)
+          // Any state change (flipping the switch) toggles the corresponding relay
           switch (i)
           {
             case 0: relayToggle(1); break;
@@ -423,7 +511,7 @@ void handleWallSwitches()
         }
         else
         {
-          // Switches 5 and 6 (SwitchPin5, SwitchPin6): Momentary button behavior
+          // Switches 5 and 6 (SwitchPin5, SwitchPin6): Keep original momentary button behavior
           if (currentState == LOW) // Button Pressed Down
           {
             buttonIsDown[i] = true;
@@ -438,8 +526,8 @@ void handleWallSwitches()
               
               if (!buttonHeldTriggered[i])
               {
-                if (i == 4) dimm_Dn();          
-                else if (i == 5) dimm_Up();     
+                if (i == 4) dimm_Dn();          // SwitchPin5 short click: Step down -1
+                else if (i == 5) dimm_Up();     // SwitchPin6 short click: Step up +1
               }
             }
           }
@@ -453,8 +541,8 @@ void handleWallSwitches()
       if (currentMillis - buttonPressStartTime[i] >= LONG_PRESS_THRESHOLD)
       {
         buttonHeldTriggered[i] = true; 
-        if (i == 4) setDimmerLevel(DIMMER_MIN); 
-        else setDimmerLevel(DIMMER_MAX);      
+        if (i == 4) setDimmerLevel(DIMMER_MIN); // Long hold on Down button jumps straight to 0
+        else setDimmerLevel(DIMMER_MAX);      // Long hold on Up button jumps straight to 9
       }
     }
   }
@@ -472,7 +560,7 @@ void setup()
   pinMode(RelayPin3, OUTPUT);
   pinMode(RelayPin4, OUTPUT);
   pinMode(TriacPin, OUTPUT);
-  pinMode(BuzzerPin, OUTPUT); // Initialize buzzer pin as output
+  pinMode(BuzzerPin, OUTPUT);
 
   pinMode(ZeroCrossPin, INPUT_PULLUP);
   pinMode(SwitchPin1, INPUT_PULLUP);
