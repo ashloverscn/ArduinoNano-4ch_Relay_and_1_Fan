@@ -606,15 +606,11 @@ void setup()
 
   atmega328_16mhz_ac_phase_control.init();
 
+  // FIX: Properly reference the corresponding pin from the array during startup initialization
+  uint8_t switchPins[6] = {SwitchPin1, SwitchPin2, SwitchPin3, SwitchPin4, SwitchPin5, SwitchPin6};
   for (int i = 0; i < 6; i++)
   {
-    uint8_t p = SwitchPin1;
-    if(i==1) p = SwitchPin2;
-    if(i==2) p = SwitchPin3;
-    if(i==3) p = SwitchPin4;
-    if(i==4) p = SwitchPin5;
-    if(i==5) p = SwitchPin6;
-    buttonLastStates[i] = digitalRead(p);
+    buttonLastStates[i] = digitalRead(switchPins[i]);
   }
 
   delay(500);
