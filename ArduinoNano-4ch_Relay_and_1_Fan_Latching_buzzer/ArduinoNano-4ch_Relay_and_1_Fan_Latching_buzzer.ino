@@ -97,7 +97,7 @@ void beep(unsigned int frequency, unsigned long duration)
   tone(BuzzerPin, frequency, duration);
 }
 
-// Helper function for double buzzer feedback (when state/value is already matched)
+// Helper function for double buzzer feedback (when state/value is already matched or at limit)
 void doubleBeep(unsigned int frequency, unsigned long duration)
 {
   tone(BuzzerPin, frequency, duration);
@@ -191,33 +191,62 @@ void dimm_Up()
     dimm_value++; 
     applyDimmer();
     
-    if (EEPROM.read(EEPROM_DIMMER) != dimm_value)
+    uint8_t newTriacState = triacState ? 1 : 0;
+    bool stateChanged = false;
+    if (EEPROM.read(EEPROM_DIMMER) != dimm_value || EEPROM.read(EEPROM_TRIAC_STATE) != newTriacState)
     {
       EEPROM.update(EEPROM_DIMMER, dimm_value);
-      beep(2500, 35);
+      EEPROM.update(EEPROM_TRIAC_STATE, newTriacState);
+      stateChanged = true;
+    }
+    
+    if (stateChanged)
+    {
+      beep(2500, 35); // Single beep on successful EEPROM update/value change
     }
     
     sendDimmerStatus();
     sendPeriodicStatus(nullptr);
   }
+  else
+  {
+    doubleBeep(2500, 35); // Double beep if already at max limit
+  }
 }
 
 void dimm_Dn()
 {
-  if (!triacState) return;
+  if (!triacState) 
+  { 
+    doubleBeep(2500, 35); // Double beep if already off
+    return; 
+  }
+  
   if (dimm_value > DIMMER_MIN) 
   { 
     dimm_value--; 
     applyDimmer();
     
-    if (EEPROM.read(EEPROM_DIMMER) != dimm_value)
+    uint8_t newTriacState = (dimm_value > 0) ? 1 : 0;
+    bool stateChanged = false;
+    if (EEPROM.read(EEPROM_DIMMER) != dimm_value || EEPROM.read(EEPROM_TRIAC_STATE) != newTriacState)
     {
       EEPROM.update(EEPROM_DIMMER, dimm_value);
-      beep(2500, 35);
+      EEPROM.update(EEPROM_TRIAC_STATE, newTriacState);
+      stateChanged = true;
+    }
+    
+    if (stateChanged)
+    {
+      beep(2500, 35); // Single beep on successful EEPROM update/value change
     }
     
     sendDimmerStatus();
     sendPeriodicStatus(nullptr);
+  }
+  else
+  {
+    doubleBeep(2500, 35); // Double beep if already at min limit
   }
 }
 
@@ -244,7 +273,7 @@ void setDimmerLevel(uint8_t val)
   
   if (stateChanged)
   {
-    beep(2500, 35);      // Single beep when dimmer level actually changes
+    beep(2500, 35);      // Single beep when dimmer level actually changes and updates EEPROM
   }
   else
   {
@@ -500,7 +529,6 @@ void handleWallSwitches()
         if (i < 4)
         {
           // Switches 1 to 4: Standard wall latching switches (SPDT toggle)
-          // Any state change (flipping the switch) toggles the corresponding relay
           switch (i)
           {
             case 0: relayToggle(1); break;
