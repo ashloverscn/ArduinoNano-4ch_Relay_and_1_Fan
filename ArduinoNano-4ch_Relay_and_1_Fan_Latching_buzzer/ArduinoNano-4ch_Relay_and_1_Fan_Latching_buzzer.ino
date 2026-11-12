@@ -91,10 +91,21 @@ void sendDimmerStatus();
 bool sendPeriodicStatus(void*);
 void setDimmerLevel(uint8_t val);
 
-// Buzzer feedback helper function
+// Safe software-driven beep function (does not hijack hardware timers)
 void beep(unsigned int frequency, unsigned long duration)
 {
-  tone(BuzzerPin, frequency, duration);
+  if (frequency == 0 || duration == 0) return;
+
+  unsigned long halfPeriod = 500000UL / frequency; 
+  unsigned long totalCycles = ((unsigned long)frequency * duration) / 1000;
+
+  for (unsigned long i = 0; i < totalCycles; i++)
+  {
+    digitalWrite(BuzzerPin, HIGH);
+    delayMicroseconds(halfPeriod);
+    digitalWrite(BuzzerPin, LOW);
+    delayMicroseconds(halfPeriod);
+  }
 }
 
 void applyDimmer()
