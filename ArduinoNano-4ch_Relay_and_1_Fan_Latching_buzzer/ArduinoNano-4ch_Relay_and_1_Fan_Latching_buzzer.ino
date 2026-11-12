@@ -568,6 +568,9 @@ void setup()
   eepromState();
 
   timer.every(10000, sendPeriodicStatus);
+
+  // Startup beep added here (2500Hz for 50ms)
+  beep(2500, 50);
 }
 
 void loop()
