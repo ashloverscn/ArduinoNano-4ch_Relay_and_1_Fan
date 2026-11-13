@@ -108,6 +108,18 @@ void beep(unsigned int frequency, unsigned long duration)
   }
 }
 
+void beepStateChanged()
+{
+  beep(2500, 35);
+}
+
+void beepNoChange()
+{
+  beep(1200, 75);
+  delay(45);
+  beep(1200, 75);
+}
+
 void applyDimmer()
 {
   if (triacState)
@@ -141,9 +153,13 @@ void triacOn()
   EEPROM.update(EEPROM_DIMMER, dimm_value);
   EEPROM.update(EEPROM_TRIAC_STATE, 1);
   
-  if (EEPROM.read(EEPROM_DIMMER) != oldDimmer || EEPROM.read(EEPROM_TRIAC_STATE) != 1)
+  if (oldDimmer != dimm_value || oldTriac != 1)
   {
-    beep(2500, 35);
+    beepStateChanged();
+  }
+  else
+  {
+    beepNoChange();
   }
 
   sendDimmerStatus();
@@ -162,9 +178,13 @@ void triacOff()
   EEPROM.update(EEPROM_DIMMER, dimm_value);
   EEPROM.update(EEPROM_TRIAC_STATE, 0);
   
-  if (EEPROM.read(EEPROM_DIMMER) != oldDimmer || EEPROM.read(EEPROM_TRIAC_STATE) != 0)
+  if (oldDimmer != dimm_value || oldTriac != 0)
   {
-    beep(2500, 35);
+    beepStateChanged();
+  }
+  else
+  {
+    beepNoChange();
   }
 
   sendDimmerStatus();
@@ -179,20 +199,24 @@ void triacOnOff()
 
 void dimm_Up()
 {
-  if (!triacState) 
-  { 
-    setDimmerLevel(1); 
-    return; 
+  if (!triacState)
+  {
+    setDimmerLevel(1);
+    return;
   }
-  
+
+  uint8_t previousDimmer = dimm_value;
   if (dimm_value < DIMMER_MAX) { dimm_value++; }
   applyDimmer();
-  
-  uint8_t oldDimmer = EEPROM.read(EEPROM_DIMMER);
+
   EEPROM.update(EEPROM_DIMMER, dimm_value);
-  if (EEPROM.read(EEPROM_DIMMER) != oldDimmer)
+  if (dimm_value != previousDimmer)
   {
-    beep(2500, 35);
+    beepStateChanged();
+  }
+  else
+  {
+    beepNoChange();
   }
 
   sendDimmerStatus();
@@ -201,15 +225,26 @@ void dimm_Up()
 
 void dimm_Dn()
 {
-  if (!triacState) return;
+  if (!triacState)
+  {
+    beepNoChange();
+    sendDimmerStatus();
+    sendPeriodicStatus(nullptr);
+    return;
+  }
+
+  uint8_t previousDimmer = dimm_value;
   if (dimm_value > DIMMER_MIN) { dimm_value--; }
   applyDimmer();
-  
-  uint8_t oldDimmer = EEPROM.read(EEPROM_DIMMER);
+
   EEPROM.update(EEPROM_DIMMER, dimm_value);
-  if (EEPROM.read(EEPROM_DIMMER) != oldDimmer)
+  if (dimm_value != previousDimmer)
   {
-    beep(2500, 35);
+    beepStateChanged();
+  }
+  else
+  {
+    beepNoChange();
   }
 
   sendDimmerStatus();
@@ -230,9 +265,13 @@ void setDimmerLevel(uint8_t val)
   EEPROM.update(EEPROM_DIMMER, dimm_value);
   EEPROM.update(EEPROM_TRIAC_STATE, newTriacState);
   
-  if (EEPROM.read(EEPROM_DIMMER) != oldDimmer || EEPROM.read(EEPROM_TRIAC_STATE) != newTriacState)
+  if (oldDimmer != dimm_value || oldTriac != newTriacState)
   {
-    beep(2500, 35);
+    beepStateChanged();
+  }
+  else
+  {
+    beepNoChange();
   }
 
   sendDimmerStatus();
@@ -258,9 +297,13 @@ void setRelayState(int relay, bool turnOn)
   uint8_t targetVal = turnOn ? HIGH : LOW;
   uint8_t oldVal = EEPROM.read(eepromAddress);
   EEPROM.update(eepromAddress, targetVal);
-  if (EEPROM.read(eepromAddress) != oldVal)
+  if (oldVal != targetVal)
   {
     beep(2000, 30);
+  }
+  else
+  {
+    beepNoChange();
   }
 
   sendTasmotaStatus(relay, turnOn);
