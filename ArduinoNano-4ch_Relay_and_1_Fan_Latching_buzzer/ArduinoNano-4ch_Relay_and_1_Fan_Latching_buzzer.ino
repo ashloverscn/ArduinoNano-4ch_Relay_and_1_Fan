@@ -91,6 +91,24 @@ void sendDimmerStatus();
 bool sendPeriodicStatus(void*);
 void setDimmerLevel(uint8_t val);
 
+bool batchFeedback = false;
+bool batchStateChanged = false;
+
+void beepStateChanged();
+void beepNoChange();
+
+void playStateFeedback(bool changed)
+{
+  if (batchFeedback)
+  {
+    if (changed) batchStateChanged = true;
+    return;
+  }
+
+  if (changed) beepStateChanged();
+  else beepNoChange();
+}
+
 // Safe software-driven beep function (does not hijack hardware timers)
 void beep(unsigned int frequency, unsigned long duration)
 {
@@ -115,9 +133,7 @@ void beepStateChanged()
 
 void beepNoChange()
 {
-  beep(1200, 75);
-  delay(45);
-  beep(1200, 75);
+  beep(1200, 100);
 }
 
 void applyDimmer()
@@ -153,14 +169,7 @@ void triacOn()
   EEPROM.update(EEPROM_DIMMER, dimm_value);
   EEPROM.update(EEPROM_TRIAC_STATE, 1);
   
-  if (oldDimmer != dimm_value || oldTriac != 1)
-  {
-    beepStateChanged();
-  }
-  else
-  {
-    beepNoChange();
-  }
+  playStateFeedback(oldDimmer != dimm_value || oldTriac != 1);
 
   sendDimmerStatus();
   sendPeriodicStatus(nullptr);
@@ -178,14 +187,7 @@ void triacOff()
   EEPROM.update(EEPROM_DIMMER, dimm_value);
   EEPROM.update(EEPROM_TRIAC_STATE, 0);
   
-  if (oldDimmer != dimm_value || oldTriac != 0)
-  {
-    beepStateChanged();
-  }
-  else
-  {
-    beepNoChange();
-  }
+  playStateFeedback(oldDimmer != dimm_value || oldTriac != 0);
 
   sendDimmerStatus();
   sendPeriodicStatus(nullptr);
@@ -210,14 +212,7 @@ void dimm_Up()
   applyDimmer();
 
   EEPROM.update(EEPROM_DIMMER, dimm_value);
-  if (dimm_value != previousDimmer)
-  {
-    beepStateChanged();
-  }
-  else
-  {
-    beepNoChange();
-  }
+  playStateFeedback(dimm_value != previousDimmer);
 
   sendDimmerStatus();
   sendPeriodicStatus(nullptr);
@@ -227,7 +222,7 @@ void dimm_Dn()
 {
   if (!triacState)
   {
-    beepNoChange();
+    playStateFeedback(false);
     sendDimmerStatus();
     sendPeriodicStatus(nullptr);
     return;
@@ -238,14 +233,7 @@ void dimm_Dn()
   applyDimmer();
 
   EEPROM.update(EEPROM_DIMMER, dimm_value);
-  if (dimm_value != previousDimmer)
-  {
-    beepStateChanged();
-  }
-  else
-  {
-    beepNoChange();
-  }
+  playStateFeedback(dimm_value != previousDimmer);
 
   sendDimmerStatus();
   sendPeriodicStatus(nullptr);
@@ -265,14 +253,7 @@ void setDimmerLevel(uint8_t val)
   EEPROM.update(EEPROM_DIMMER, dimm_value);
   EEPROM.update(EEPROM_TRIAC_STATE, newTriacState);
   
-  if (oldDimmer != dimm_value || oldTriac != newTriacState)
-  {
-    beepStateChanged();
-  }
-  else
-  {
-    beepNoChange();
-  }
+  playStateFeedback(oldDimmer != dimm_value || oldTriac != newTriacState);
 
   sendDimmerStatus();
   sendPeriodicStatus(nullptr);
@@ -297,14 +278,7 @@ void setRelayState(int relay, bool turnOn)
   uint8_t targetVal = turnOn ? HIGH : LOW;
   uint8_t oldVal = EEPROM.read(eepromAddress);
   EEPROM.update(eepromAddress, targetVal);
-  if (oldVal != targetVal)
-  {
-    beep(2000, 30);
-  }
-  else
-  {
-    beepNoChange();
-  }
+  playStateFeedback(oldVal != targetVal);
 
   sendTasmotaStatus(relay, turnOn);
   sendPeriodicStatus(nullptr);
@@ -397,20 +371,32 @@ void ir_remote()
 
 void all_Switch_ON()
 {
+  batchStateChanged = false;
+  batchFeedback = true;
+
   setRelayState(1, true);
   setRelayState(2, true);
   setRelayState(3, true);
   setRelayState(4, true);
   setDimmerLevel(DIMMER_MAX);
+
+  batchFeedback = false;
+  playStateFeedback(batchStateChanged);
 }
 
 void all_Switch_OFF()
 {
+  batchStateChanged = false;
+  batchFeedback = true;
+
   setRelayState(1, false);
   setRelayState(2, false);
   setRelayState(3, false);
   setRelayState(4, false);
   setDimmerLevel(DIMMER_MIN);
+
+  batchFeedback = false;
+  playStateFeedback(batchStateChanged);
 }
 
 bool sendPeriodicStatus(void*)
