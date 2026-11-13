@@ -240,7 +240,7 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
 
     <!-- Relays Control -->
     <div class="card">
-        <div class="card-title">Relay Controls (Bridged)</div>
+        <div class="card-title">Relay Controls</div>
         <div class="relay-grid">
             <button id="relay-1" class="relay-btn" onclick="toggleRelay(1)">Relay 1<br>OFF</button>
             <button id="relay-2" class="relay-btn" onclick="toggleRelay(2)">Relay 2<br>OFF</button>
