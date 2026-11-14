@@ -530,8 +530,8 @@ void handleWallSwitches()
               
               if (!buttonHeldTriggered[i])
               {
-                if (i == 4) dimm_Dn();          // SwitchPin5 short click: Step down -1
-                else if (i == 5) dimm_Up();     // SwitchPin6 short click: Step up +1
+                if (i == 4) dimm_Dn();         // SwitchPin5 short click: Step down -1
+                else if (i == 5) dimm_Up();      // SwitchPin6 short click: Step up +1
               }
             }
           }
@@ -598,8 +598,8 @@ void setup()
 
   timer.every(10000, sendPeriodicStatus);
 
-  // Startup beep added here (2500Hz for 50ms)
-  beep(2500, 50);
+  // Startup beep frequency changed to match the limit/end-of-value beep frequency (1200Hz for 50ms)
+  beep(1200, 50);
 }
 
 void loop()
