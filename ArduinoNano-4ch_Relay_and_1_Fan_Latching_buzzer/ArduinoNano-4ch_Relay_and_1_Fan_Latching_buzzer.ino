@@ -128,12 +128,12 @@ void beep(unsigned int frequency, unsigned long duration)
 
 void beepStateChanged()
 {
-  beep(2500, 70); // Increased duration from 35ms to 70ms for better audibility/presence
+  beep(1400, 80);
 }
 
 void beepNoChange()
 {
-  beep(1200, 100); // Reverted back to original 1200Hz frequency
+  beep(1100, 90);
 }
 
 void applyDimmer()
