@@ -133,7 +133,7 @@ void beepStateChanged()
 
 void beepNoChange()
 {
-  beep(1200, 100);
+  beep(2500, 100); // Updated frequency to 2500Hz for better audibility, matching state change beep frequency
 }
 
 void applyDimmer()
