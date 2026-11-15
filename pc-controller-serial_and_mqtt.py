@@ -142,7 +142,7 @@ class ArduinoControllerApp:
         default_config = {
             "port": "",
             "baud": 115200,
-            "esp_ip": "192.168.29.100",
+            "esp_ip": "192.168.29.110",
             "ws_port": 81,
             "mqtt_server": "i11b0026.ala.eu-central-1.emqxsl.com",
             "mqtt_port": 8883,
