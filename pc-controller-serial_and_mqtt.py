@@ -6,17 +6,19 @@ from tkinter import messagebox, scrolledtext, ttk
 import serial
 import serial.tools.list_ports
 import paho.mqtt.client as mqtt
+import asyncio
+import websockets
 
 CONFIG_FILE = "arduino_config.json"
 
 
 class ConfigWindow(tk.Toplevel):
-    """Dedicated Configuration Window for Serial & MQTT Settings"""
+    """Dedicated Configuration Window for Serial, MQTT & IP/WebSocket Settings"""
 
     def __init__(self, parent, current_config, on_save_callback):
         super().__init__(parent)
-        self.title("Connection & MQTT Configuration")
-        self.geometry("450x480")
+        self.title("Connection & Protocol Configuration")
+        self.geometry("450x550")
         self.resizable(False, False)
         self.config_data = current_config
         self.on_save_callback = on_save_callback
@@ -33,18 +35,20 @@ class ConfigWindow(tk.Toplevel):
 
         ttk.Label(
             main_frame,
-            text="Serial & Broker Configuration",
+            text="Connection Settings",
             font=("Arial", 12, "bold"),
         ).pack(anchor="w", pady=(0, 10))
 
         form_frame = ttk.LabelFrame(
-            main_frame, text="Connection Parameters", padding=10
+            main_frame, text="Parameters", padding=10
         )
         form_frame.pack(fill="both", expand=True, pady=5)
 
         self.entries = {}
         fields = [
             ("baud", "Default Baudrate:"),
+            ("esp_ip", "ESP32 Local IP:"),
+            ("ws_port", "WebSocket Port:"),
             ("mqtt_server", "MQTT Server:"),
             ("mqtt_port", "MQTT Port:"),
             ("mqtt_user", "MQTT Username:"),
@@ -90,11 +94,11 @@ class ConfigWindow(tk.Toplevel):
         new_config = {}
         for key, entry in self.entries.items():
             val = entry.get()
-            if key in ["baud", "mqtt_port"]:
+            if key in ["baud", "mqtt_port", "ws_port"]:
                 try:
                     val = int(val)
                 except ValueError:
-                    val = 115200 if key == "baud" else 8883
+                    val = 115200 if key == "baud" else (81 if key == "ws_port" else 8883)
             new_config[key] = val
 
         self.on_save_callback(new_config)
@@ -108,13 +112,16 @@ class ArduinoControllerApp:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("ESP32 Home Automation Controller (Stable)")
-        self.root.geometry("620x620")
+        self.root.title("ESP32 Home Automation (Serial / IP / MQTT)")
+        self.root.geometry("620x680")
         self.root.resizable(False, False)
 
         self.ser = None
         self.is_connected = False
-        self.read_thread = None
+        self.is_ip_connected = False
+        self.ws_connection = None
+        self.ws_loop = None
+        self.ws_thread = None
 
         self.relay_states = [False, False, False, False]
         self.relay_buttons = []
@@ -135,12 +142,14 @@ class ArduinoControllerApp:
         default_config = {
             "port": "",
             "baud": 115200,
+            "esp_ip": "192.168.29.100",
+            "ws_port": 81,
             "mqtt_server": "i11b0026.ala.eu-central-1.emqxsl.com",
             "mqtt_port": 8883,
             "mqtt_user": "admin",
             "mqtt_pass": "admin1234S",
-            "mqtt_topic_cmd": "home/esp8266/command",
-            "mqtt_topic_state": "home/esp8266/state",
+            "mqtt_topic_cmd": "home/esp32/command",
+            "mqtt_topic_state": "home/esp32/state",
         }
         if os.path.exists(CONFIG_FILE):
             try:
@@ -166,6 +175,7 @@ class ArduinoControllerApp:
                 self.config["baud"] = int(self.baud_entry.get())
             except ValueError:
                 pass
+            self.config["esp_ip"] = self.ip_entry.get()
             self.save_config_to_disk()
 
             if hasattr(self, "mqtt_client"):
@@ -226,11 +236,11 @@ class ArduinoControllerApp:
         )
         config_btn.pack(side="right", padx=5)
 
-        # --- CONNECTION FRAME ---
+        # --- CONNECTION FRAME (SERIAL) ---
         conn_frame = ttk.LabelFrame(
             self.root, text="Serial Connection", padding=10
         )
-        conn_frame.pack(fill="x", padx=10, pady=10)
+        conn_frame.pack(fill="x", padx=10, pady=5)
 
         ttk.Label(conn_frame, text="Port:").grid(
             row=0, column=0, sticky="w", padx=5
@@ -243,17 +253,34 @@ class ArduinoControllerApp:
         )
         refresh_btn.grid(row=0, column=2, padx=5)
 
-        ttk.Label(conn_frame, text="Baudrate:").grid(
+        ttk.Label(conn_frame, text="Baud:").grid(
             row=0, column=3, sticky="w", padx=5
         )
-        self.baud_entry = ttk.Entry(conn_frame, width=10)
+        self.baud_entry = ttk.Entry(conn_frame, width=8)
         self.baud_entry.insert(0, "115200")
         self.baud_entry.grid(row=0, column=4, padx=5)
 
         self.connect_btn = ttk.Button(
             conn_frame, text="Connect", command=self.toggle_connection
         )
-        self.connect_btn.grid(row=0, column=5, padx=10)
+        self.connect_btn.grid(row=0, column=5, padx=5)
+
+        # --- IP / WEBSOCKET CONNECTION FRAME ---
+        ip_frame = ttk.LabelFrame(
+            self.root, text="IP / WebSocket Connection (Direct Over Wi-Fi)", padding=10
+        )
+        ip_frame.pack(fill="x", padx=10, pady=5)
+
+        ttk.Label(ip_frame, text="ESP32 IP:").grid(
+            row=0, column=0, sticky="w", padx=5
+        )
+        self.ip_entry = ttk.Entry(ip_frame, width=18)
+        self.ip_entry.grid(row=0, column=1, padx=5)
+
+        self.ip_connect_btn = ttk.Button(
+            ip_frame, text="Connect IP", command=self.toggle_ip_connection
+        )
+        self.ip_connect_btn.grid(row=0, column=2, padx=10)
 
         # --- RELAYS FRAME ---
         relay_frame = ttk.LabelFrame(self.root, text="Relay Controls", padding=10)
@@ -284,7 +311,7 @@ class ArduinoControllerApp:
         d_sub.pack(fill="x", padx=5)
 
         ttk.Button(
-            d_sub, text="MIN (0)", command=lambda: self.send_command("DIMMER 0")
+            d_sub, text="MIN (0)", command=lambda: self.send_command("DIMMER:0")
         ).pack(side="left", padx=5)
         ttk.Button(
             d_sub, text="Step -", command=lambda: self.send_command("DIMM_DN")
@@ -300,7 +327,7 @@ class ArduinoControllerApp:
             d_sub, text="Step +", command=lambda: self.send_command("DIMM_UP")
         ).pack(side="left", padx=5)
         ttk.Button(
-            d_sub, text="MAX (9)", command=lambda: self.send_command("DIMMER 9")
+            d_sub, text="MAX (9)", command=lambda: self.send_command("DIMMER:9")
         ).pack(side="left", padx=5)
 
         # --- GLOBAL & UTILS FRAME ---
@@ -324,7 +351,7 @@ class ArduinoControllerApp:
 
         # --- LOG / CONSOLE OUTPUT ---
         log_frame = ttk.LabelFrame(
-            self.root, text="Serial Console / Feedback", padding=10
+            self.root, text="Console / Feedback Log", padding=10
         )
         log_frame.pack(fill="both", expand=True, padx=10, pady=5)
 
@@ -338,9 +365,9 @@ class ArduinoControllerApp:
         self, client, userdata, flags, reason_code, properties=None
     ):
         if reason_code == 0:
-            self.safe_log("Connected to EMQX MQTT Broker.\n")
-            t_cmd = self.config.get("mqtt_topic_cmd", "home/esp8266/command")
-            t_state = self.config.get("mqtt_topic_state", "home/esp8266/state")
+            self.safe_log("Connected to MQTT Broker.\n")
+            t_cmd = self.config.get("mqtt_topic_cmd", "home/esp32/command")
+            t_state = self.config.get("mqtt_topic_state", "home/esp32/state")
             client.subscribe(t_cmd)
             client.subscribe(t_state)
         else:
@@ -365,6 +392,7 @@ class ArduinoControllerApp:
     def load_saved_settings(self):
         saved_port = self.config.get("port")
         saved_baud = self.config.get("baud")
+        saved_ip = self.config.get("esp_ip")
         available_ports = list(self.port_combo["values"])
 
         if saved_baud:
@@ -374,8 +402,16 @@ class ArduinoControllerApp:
         if saved_port and saved_port in available_ports:
             self.port_combo.set(saved_port)
 
+        if saved_ip:
+            self.ip_entry.delete(0, tk.END)
+            self.ip_entry.insert(0, str(saved_ip))
+
     def toggle_connection(self):
         if not self.is_connected:
+            if self.is_ip_connected:
+                messagebox.showwarning("Warning", "Disconnect IP WebSocket first.")
+                return
+
             selected_port = self.port_combo.get()
             baudrate_str = self.baud_entry.get()
 
@@ -402,9 +438,7 @@ class ArduinoControllerApp:
                 )
                 self.read_thread.start()
 
-                self.log_message(
-                    f"Connected to {selected_port} at {baudrate} baud.\n"
-                )
+                self.log_message(f"Connected to Serial {selected_port}.\n")
                 self.send_command("STATUS")
             except Exception as e:
                 messagebox.showerror("Connection Error", str(e))
@@ -416,19 +450,80 @@ class ArduinoControllerApp:
         self.is_connected = False
         try:
             if self.ser and self.ser.is_open:
-                self.ser.cancel_read()
-                self.ser.cancel_write()
                 self.ser.close()
-        except Exception as e:
-            print(e)
+        except Exception:
+            pass
 
         try:
             self.connect_btn.config(text="Connect")
             self.port_combo.config(state="readonly")
             self.baud_entry.config(state="normal")
-            self.log_message("Disconnected.\n")
+            self.log_message("Serial Disconnected.\n")
         except Exception:
             pass
+
+    # --- WebSocket / IP Connection Logic ---
+    def toggle_ip_connection(self):
+        if not self.is_ip_connected:
+            if self.is_connected:
+                messagebox.showwarning("Warning", "Disconnect Serial first.")
+                return
+
+            ip_address = self.ip_entry.get().strip()
+            if not ip_address:
+                messagebox.showerror("Error", "Please enter a valid ESP32 IP address.")
+                return
+
+            self.config["esp_ip"] = ip_address
+            self.save_config_to_disk()
+
+            # Start WebSocket connection thread
+            self.ws_thread = threading.Thread(target=self.start_ws_client_thread, args=(ip_address,), daemon=True)
+            self.ws_thread.start()
+        else:
+            self.disconnect_ip()
+
+    def start_ws_client_thread(self, ip):
+        self.ws_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.ws_loop)
+        try:
+            self.ws_loop.run_until_complete(self.ws_client_handler(ip))
+        except Exception as e:
+            self.safe_log(f">> WebSocket Loop Error: {e}\n")
+
+    async def ws_client_handler(self, ip):
+        ws_port = self.config.get("ws_port", 81)
+        uri = f"ws://{ip}:{ws_port}/"
+        self.safe_log(f">> Connecting to WebSocket {uri}...\n")
+        try:
+            async with websockets.connect(uri) as websocket:
+                self.ws_connection = websocket
+                self.is_ip_connected = True
+                self.root.after(0, lambda: self.ip_connect_btn.config(text="Disconnect IP"))
+                self.root.after(0, lambda: self.ip_entry.config(state="disabled"))
+                self.safe_log(f">> Connected to ESP32 WebSocket at {ip}!\n")
+                
+                # Request initial status
+                await websocket.send(json.dumps({"command": "STATUS"}))
+
+                async for message in websocket:
+                    self.safe_log(f"<< {message}\n")
+                    self.parse_arduino_feedback(message)
+        except Exception as e:
+            self.safe_log(f">> WebSocket Connection Failed: {e}\n")
+        finally:
+            self.is_ip_connected = False
+            self.ws_connection = None
+            self.root.after(0, lambda: self.ip_connect_btn.config(text="Connect IP"))
+            self.root.after(0, lambda: self.ip_entry.config(state="normal"))
+            self.safe_log(">> IP WebSocket Disconnected.\n")
+
+    def disconnect_ip(self):
+        if self.ws_connection and self.ws_loop:
+            asyncio.run_coroutine_threadsafe(self.ws_connection.close(), self.ws_loop)
+        self.is_ip_connected = False
+        self.ip_connect_btn.config(text="Connect IP")
+        self.ip_entry.config(state="normal")
 
     def toggle_relay(self, relay_num):
         idx = relay_num - 1
@@ -438,6 +533,7 @@ class ArduinoControllerApp:
         self.send_command(cmd)
 
     def send_command(self, cmd):
+        # Priority 1: Serial
         if self.is_connected and self.ser and self.ser.is_open:
             try:
                 full_cmd = (cmd + "\n").encode("utf-8")
@@ -446,23 +542,32 @@ class ArduinoControllerApp:
             except Exception as e:
                 self.log_message(f">> Serial Write Error: {e}\n")
                 self.disconnect_serial()
+        
+        # Priority 2: IP / WebSocket
+        elif self.is_ip_connected and self.ws_connection and self.ws_loop:
+            try:
+                payload = json.dumps({"command": cmd})
+                asyncio.run_coroutine_threadsafe(self.ws_connection.send(payload), self.ws_loop)
+                self.log_message(f">> {cmd} (WebSocket IP)\n")
+            except Exception as e:
+                self.log_message(f">> WebSocket Send Error: {e}\n")
+        
+        # Fallback: MQTT Broadcast
         else:
             try:
                 mqtt_payload = json.dumps({"command": cmd})
-                t_cmd = self.config.get(
-                    "mqtt_topic_cmd", "home/esp8266/command"
-                )
+                t_cmd = self.config.get("mqtt_topic_cmd", "home/esp32/command")
                 self.mqtt_client.publish(t_cmd, mqtt_payload)
                 self.log_message(f">> {cmd} (MQTT Broadcast)\n")
             except Exception as e:
-                self.log_message(f">> {cmd} (Failed - No Connection)\n")
+                self.log_message(f">> {cmd} (Failed - No Active Link)\n")
 
     def on_slider_release(self, event):
         val_int = int(round(self.dimmer_slider.get()))
         self.dimmer_slider.set(val_int)
         if val_int != self.last_sent_dimmer:
             self.last_sent_dimmer = val_int
-            self.send_command(f"DIMMER {val_int}")
+            self.send_command(f"DIMMER:{val_int}")
 
     def read_serial(self):
         while self.is_connected:
@@ -540,10 +645,9 @@ class ArduinoControllerApp:
 
     def on_closing(self):
         self.is_connected = False
+        self.disconnect_ip()
         try:
             if self.ser and self.ser.is_open:
-                self.ser.cancel_read()
-                self.ser.cancel_write()
                 self.ser.close()
         except Exception:
             pass
