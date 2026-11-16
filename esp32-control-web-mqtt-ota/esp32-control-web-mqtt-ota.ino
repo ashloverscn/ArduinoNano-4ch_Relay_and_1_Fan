@@ -47,6 +47,11 @@ WebSocketsServer webSocket(81);
 WiFiClientSecure espClient;
 PubSubClient mqttClient(espClient);
 
+// --- FreeRTOS Mutex & Handle for Parallel MQTT Task ---
+TaskHandle_t mqttTaskHandle = NULL;
+SemaphoreHandle_t mqttMutex = NULL;
+volatile bool triggerMqttConnect = false; // Flag for on-demand connection attempt
+
 // --- Serial Buffering State (50ms Silence Timeout) ---
 String serialBuffer = "";
 unsigned long lastCharTime = 0;
@@ -57,10 +62,6 @@ unsigned long lastWiFiCheckTime = 0;
 const unsigned long WIFI_RETRY_INTERVAL = 10000; 
 unsigned long wifiDisconnectedStartTime = 0;        
 const unsigned long WIFI_AP_FALLBACK_TIMEOUT = 600000; // 10 minutes
-
-// --- Non-Blocking MQTT Reconnect State ---
-unsigned long lastMqttRetry = 0;
-const unsigned long MQTT_RETRY_INTERVAL = 10000; // 10 seconds retry delay
 
 // --- GPIO 0 Button Press States (3s AP Mode & 10s Factory Reset) ---
 const int CONFIG_BUTTON_PIN = 0;
@@ -78,7 +79,7 @@ void saveConfig(String ssid, String pass, String srv, int prt, String usr, Strin
 void logMessage(const String& msg);
 void handleCommand(const String& cmd);
 void processBufferedSerial(const String& data);
-void reconnectMQTT();
+void mqttTaskCode(void * pvParameters);
 void callbackMQTT(char* topic, byte* payload, unsigned int length);
 void checkWiFiConnection();
 void checkButton();
@@ -340,7 +341,7 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
-// --- Configuration Page HTML (Includes OTA Firmware Upgrade Section) ---
+// --- Configuration Page HTML ---
 const char CONFIG_PAGE[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="en">
@@ -595,7 +596,10 @@ void logMessage(const String& msg) {
     doc["message"] = msg;
     String output;
     serializeJson(doc, output);
-    webSocket.broadcastTXT(output);
+    if (mqttMutex != NULL && xSemaphoreTake(mqttMutex, (TickType_t)10) == pdTRUE) {
+        webSocket.broadcastTXT(output);
+        xSemaphoreGive(mqttMutex);
+    }
 }
 
 // --- Continuous Non-Blocking Wi-Fi Reconnection & 10-Min AP Fallback ---
@@ -625,7 +629,7 @@ void checkWiFiConnection() {
     }
 }
 
-// --- GPIO 0 Button Handler (3s AP Mode & 10s Factory Reset) ---
+// --- GPIO 0 Button Handler ---
 void checkButton() {
     int currentState = digitalRead(CONFIG_BUTTON_PIN);
     
@@ -638,20 +642,15 @@ void checkButton() {
     else if (currentState == LOW && buttonStateLast == LOW) {
         unsigned long heldTime = millis() - buttonPressStartTime;
         
-        // 10-Second Very Long Press: Erase NVS / Factory Reset
         if (heldTime >= VERY_LONG_PRESS_DURATION && !factoryResetTriggered) {
             factoryResetTriggered = true;
             logMessage(">> [FACTORY RESET] 10s Very Long Press detected! Erasing NVS storage...");
-            
             preferences.begin("config", false);
             preferences.clear();
             preferences.end();
-            
-            logMessage(">> NVS erased successfully. Restarting as fresh first-boot device...");
             delay(1500);
             ESP.restart();
         }
-        // 3-Second Long Press: Enter AP Configuration Mode
         else if (heldTime >= LONG_PRESS_DURATION && heldTime < VERY_LONG_PRESS_DURATION && !apTriggered && !apModeActive) {
             apTriggered = true;
             logMessage(">> 3s Long Press detected! Entering AP Configuration Mode...");
@@ -826,24 +825,41 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length) {
     }
 }
 
-// --- Non-Blocking Reconnect MQTT ---
-void reconnectMQTT() {
-    if (mqtt_enabled && !apModeActive && !mqttClient.connected() && WiFi.status() == WL_CONNECTED) {
-        unsigned long currentMillis = millis();
-        if (currentMillis - lastMqttRetry >= MQTT_RETRY_INTERVAL) {
-            lastMqttRetry = currentMillis;
-            logMessage(">> Attempting MQTT connection...");
-            String clientId = "ESP32Gateway-" + String((uint32_t)ESP.getEfuseMac(), HEX);
-            
-            // Note: PubSubClient connect() handles its own socket timeout, but spacing it out 
-            // via intervals prevents tight blocking loops that starve the web server and websockets.
-            if (mqttClient.connect(clientId.c_str(), mqtt_user.c_str(), mqtt_pass.c_str())) {
-                logMessage(">> MQTT Connected!");
-                mqttClient.subscribe(mqtt_topic_cmd.c_str());
-            } else {
-                logMessage(">> MQTT Connection failed, rc=" + String(mqttClient.state()) + ". Retrying later...");
+// --- Dedicated FreeRTOS Parallel Task for MQTT (Core 0) ---
+void mqttTaskCode(void * pvParameters) {
+    unsigned long lastMqttRetry = 0;
+    const unsigned long MQTT_5_MIN_INTERVAL = 300000; // 5 minutes interval
+
+    for(;;) {
+        if (mqtt_enabled && !apModeActive) {
+            if (WiFi.status() == WL_CONNECTED) {
+                if (!mqttClient.connected()) {
+                    unsigned long currentMillis = millis();
+                    bool timeElapsed = (currentMillis - lastMqttRetry >= MQTT_5_MIN_INTERVAL);
+
+                    // Connect if forced on-demand (e.g. user sent command) or 5 minutes have passed
+                    if (triggerMqttConnect || timeElapsed || lastMqttRetry == 0) {
+                        lastMqttRetry = currentMillis;
+                        triggerMqttConnect = false; // Reset trigger flag
+
+                        logMessage(">> Attempting MQTT connection (5-min interval / on-demand)...");
+                        String clientId = "ESP32Gateway-" + String((uint32_t)ESP.getEfuseMac(), HEX);
+                        
+                        if (mqttClient.connect(clientId.c_str(), mqtt_user.c_str(), mqtt_pass.c_str())) {
+                            logMessage(">> MQTT Connected!");
+                            mqttClient.subscribe(mqtt_topic_cmd.c_str());
+                        } else {
+                            logMessage(">> MQTT Connection failed, rc=" + String(mqttClient.state()) + ". Next retry in 5 mins.");
+                        }
+                    }
+                } else {
+                    mqttClient.loop();
+                }
             }
+        } else if (mqttClient.connected()) {
+            mqttClient.disconnect();
         }
+        vTaskDelay(250 / portTICK_PERIOD_MS); // Poll lightly without CPU overhead
     }
 }
 
@@ -856,8 +872,17 @@ void handleCommand(const String& cmd) {
     cmdDoc["command"] = trimmedCmd;
     String pubPayload;
     serializeJson(cmdDoc, pubPayload);
-    if (mqtt_enabled && mqttClient.connected()) {
-        mqttClient.publish(mqtt_topic_cmd.c_str(), pubPayload.c_str());
+    
+    if (mqtt_enabled) {
+        if (!mqttClient.connected()) {
+            // Trigger an immediate on-demand connection attempt in the background task
+            triggerMqttConnect = true;
+        } else {
+            if (mqttMutex != NULL && xSemaphoreTake(mqttMutex, (TickType_t)10) == pdTRUE) {
+                mqttClient.publish(mqtt_topic_cmd.c_str(), pubPayload.c_str());
+                xSemaphoreGive(mqttMutex);
+            }
+        }
     }
 
     Serial.println(trimmedCmd);
@@ -882,9 +907,16 @@ void processBufferedSerial(const String& data) {
             JsonDocument doc;
             DeserializationError error = deserializeJson(doc, line);
             if (!error) {
-                webSocket.broadcastTXT(line);
-                if (mqtt_enabled && mqttClient.connected()) {
-                    mqttClient.publish(mqtt_topic_state.c_str(), line.c_str());
+                if (mqttMutex != NULL && xSemaphoreTake(mqttMutex, (TickType_t)10) == pdTRUE) {
+                    webSocket.broadcastTXT(line);
+                    if (mqtt_enabled) {
+                        if (!mqttClient.connected()) {
+                            triggerMqttConnect = true; // On-demand reconnect trigger on telemetry/state broadcast
+                        } else {
+                            mqttClient.publish(mqtt_topic_state.c_str(), line.c_str());
+                        }
+                    }
+                    xSemaphoreGive(mqttMutex);
                 }
             } else {
                 logMessage(line);
@@ -916,6 +948,18 @@ void setup() {
     mqttClient.setServer(mqtt_server.c_str(), mqtt_port);
     mqttClient.setCallback(callbackMQTT);
     mqttClient.setBufferSize(512);
+
+    mqttMutex = xSemaphoreCreateMutex();
+
+    xTaskCreatePinnedToCore(
+        mqttTaskCode,
+        "MqttTask",
+        8192,
+        NULL,
+        1,
+        &mqttTaskHandle,
+        0
+    );
 
     server.on("/", HTTP_GET, []() {
         server.send_P(200, "text/html", HTML_TEMPLATE);
@@ -966,7 +1010,7 @@ void setup() {
         if (!requireConfigAuth()) return;
         server.send(200, "text/plain", "Switching to AP configuration mode...");
         delay(300);
-     enterAPMode();
+        enterAPMode();
     });
 
     server.on("/factory-reset", HTTP_POST, []() {
@@ -995,7 +1039,6 @@ void setup() {
     webSocket.onEvent(webSocketEvent);
 }
 
-// --- Main Loop ---
 void loop() {
     checkButton();
 
@@ -1005,16 +1048,6 @@ void loop() {
     }
 
     checkWiFiConnection();
-
-    if (mqtt_enabled) {
-        if (!mqttClient.connected()) {
-            reconnectMQTT(); // Non-blocking gated retry check
-        } else {
-            mqttClient.loop();
-        }
-    } else if (mqttClient.connected()) {
-        mqttClient.disconnect();
-    }
 
     webSocket.loop();
     server.handleClient();
