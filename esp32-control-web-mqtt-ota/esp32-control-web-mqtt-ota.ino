@@ -842,7 +842,7 @@ void mqttTaskCode(void * pvParameters) {
                         lastMqttRetry = currentMillis;
                         triggerMqttConnect = false; // Reset trigger flag
 
-                        logMessage(">> Attempting MQTT connection (5-min interval / on-demand)...");
+                        logMessage(">> Attempting MQTT connection...");
                         String clientId = "ESP32Gateway-" + String((uint32_t)ESP.getEfuseMac(), HEX);
                         
                         if (mqttClient.connect(clientId.c_str(), mqtt_user.c_str(), mqtt_pass.c_str())) {
