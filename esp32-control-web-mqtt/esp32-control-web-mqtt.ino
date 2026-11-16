@@ -515,6 +515,13 @@ void loadConfig() {
     mqtt_enabled = preferences.getBool("enabled", DEFAULT_MQTT_ENABLED);
     stored_web_user = preferences.getString("wuser", DEFAULT_WEB_USER);
     stored_web_pass = preferences.getString("wpass", DEFAULT_WEB_PASS);
+
+    if (stored_web_user.length() == 0 || stored_web_user.length() > 32) {
+        stored_web_user = DEFAULT_WEB_USER;
+    }
+    if (stored_web_pass.length() == 0 || stored_web_pass.length() > 32) {
+        stored_web_pass = DEFAULT_WEB_PASS;
+    }
     preferences.end();
 }
 
@@ -658,7 +665,6 @@ void enterAPMode() {
         String s_pass = server.hasArg("wifi_pass") ? server.arg("wifi_pass") : DEFAULT_PASSWORD;
         bool mEnabled = server.hasArg("mqtt_enabled");
         String srv = server.hasArg("mqtt_server") ? server.arg("mqtt_server") : DEFAULT_MQTT_SERVER;
-        // Fixed compilation error by calling .toInt() on server.arg() instead of server.hasArg()
         int prt = server.hasArg("mqtt_port") ? server.arg("mqtt_port").toInt() : DEFAULT_MQTT_PORT;
         String usr = server.hasArg("mqtt_user") ? server.arg("mqtt_user") : DEFAULT_MQTT_USER;
         String pwd = server.hasArg("mqtt_pass") ? server.arg("mqtt_pass") : DEFAULT_MQTT_PASS;
@@ -873,7 +879,6 @@ void setup() {
         String s_pass = server.hasArg("wifi_pass") ? server.arg("wifi_pass") : DEFAULT_PASSWORD;
         bool mEnabled = server.hasArg("mqtt_enabled");
         String srv = server.hasArg("mqtt_server") ? server.arg("mqtt_server") : DEFAULT_MQTT_SERVER;
-        // Fixed compilation error by calling .toInt() on server.arg() instead of server.hasArg()
         int prt = server.hasArg("mqtt_port") ? server.arg("mqtt_port").toInt() : DEFAULT_MQTT_PORT;
         String usr = server.hasArg("mqtt_user") ? server.arg("mqtt_user") : DEFAULT_MQTT_USER;
         String pwd = server.hasArg("mqtt_pass") ? server.arg("mqtt_pass") : DEFAULT_MQTT_PASS;
