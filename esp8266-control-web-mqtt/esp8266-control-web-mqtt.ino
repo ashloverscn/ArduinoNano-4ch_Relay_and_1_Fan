@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
-#include <WiFiUdp.h>
 #include <ESP8266WebServer.h>
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
@@ -153,7 +152,6 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length);
 void checkWiFiConnection();
 void checkButton();
 void enterAPMode();
-void setupOTARoutes(bool requireAuth);
 
 // --- HTML Template (Dashboard) ---
 const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
@@ -446,7 +444,7 @@ const char CONFIG_PAGE[] PROGMEM = R"rawliteral(
         }
         .back-link:hover { text-decoration: underline; }
         label { font-weight: bold; font-size: 13px; color: #555; display: block; margin-top: 10px; }
-        input[type="text"], input[type="password"], input[type="number"], input[type="file"] {
+        input[type="text"], input[type="password"], input[type="number"] {
             padding: 8px;
             border: 1px solid #ccc;
             border-radius: 4px;
@@ -494,19 +492,10 @@ const char CONFIG_PAGE[] PROGMEM = R"rawliteral(
             transition: 0.2s;
         }
         button:hover { background-color: #218838; }
-        .btn-primary { background-color: #007bff; color: #fff; }
-        .btn-primary:hover { background-color: #0056b3; }
         .btn-warning { background-color: #ffc107; color: #000; }
         .btn-warning:hover { background-color: #e0a800; }
         .btn-danger { background-color: #dc3545; color: #fff; }
         .btn-danger:hover { background-color: #c82333; }
-        #otaStatus {
-            margin-top: 10px;
-            font-weight: bold;
-            font-size: 13px;
-            color: #007bff;
-            text-align: center;
-        }
     </style>
 </head>
 <body>
@@ -559,15 +548,6 @@ const char CONFIG_PAGE[] PROGMEM = R"rawliteral(
         <input type="password" name="web_pass" id="cfg_wpass">
         
         <button type="submit">Save & Reboot</button>
-    </form>
-
-    <hr>
-    <h3>Firmware Update (OTA)</h3>
-    <form method="POST" action="/update" enctype="multipart/form-data" onsubmit="document.getElementById('otaStatus').innerText = 'Uploading & Flashing Firmware... Do not power off!';">
-        <label>Select Compiled Firmware (.bin):</label>
-        <input type="file" name="update" accept=".bin" required>
-        <button type="submit" class="btn-primary">Upload & Flash Firmware</button>
-        <div id="otaStatus"></div>
     </form>
 
     <hr>
@@ -713,49 +693,6 @@ void checkButton() {
     }
 }
 
-// --- Web OTA Firmware Update Handler ---
-void setupOTARoutes(bool requireAuth) {
-    server.on("/update", HTTP_POST, [requireAuth]() {
-        if (requireAuth && !server.authenticate(stored_web_user.c_str(), stored_web_pass.c_str())) {
-            return server.requestAuthentication();
-        }
-        server.sendHeader("Connection", "close");
-        if (Update.hasError()) {
-            server.send(200, "text/html", "<h3>OTA Update Failed! Rebooting...</h3><script>setTimeout(()=>{window.location='/'}, 4000);</script>");
-        } else {
-            server.send(200, "text/html", "<h3>OTA Update Successful! Rebooting ESP8266...</h3><script>setTimeout(()=>{window.location='/'}, 6000);</script>");
-        }
-        delay(1000);
-        ESP.restart();
-    }, [requireAuth]() {
-        if (requireAuth && !server.authenticate(stored_web_user.c_str(), stored_web_pass.c_str())) {
-            return;
-        }
-        HTTPUpload& upload = server.upload();
-        if (upload.status == UPLOAD_FILE_START) {
-            Serial.setDebugOutput(true);
-            WiFiUDP::stopAll();
-            Serial.printf(">> [OTA] Update Start: %s\n", upload.filename.c_str());
-            uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
-            if (!Update.begin(maxSketchSpace)) {
-                Update.printError(Serial);
-            }
-        } else if (upload.status == UPLOAD_FILE_WRITE) {
-            if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
-                Update.printError(Serial);
-            }
-        } else if (upload.status == UPLOAD_FILE_END) {
-            if (Update.end(true)) {
-                Serial.printf(">> [OTA] Update Success: %u bytes\nRebooting...\n", upload.totalSize);
-            } else {
-                Update.printError(Serial);
-            }
-            Serial.setDebugOutput(false);
-        }
-        yield();
-    });
-}
-
 // --- Enter Access Point Mode for Reconfiguration ---
 void enterAPMode() {
     apModeActive = true;
@@ -819,8 +756,6 @@ void enterAPMode() {
         delay(1000);
         ESP.restart();
     });
-
-    setupOTARoutes(false);
 
     server.on("/reboot-ap", HTTP_GET, []() {
         server.send(200, "text/html", "<h3>Rebooting to AP Mode...</h3>");
@@ -1035,8 +970,6 @@ void setup() {
         delay(1000);
         ESP.restart();
     });
-
-    setupOTARoutes(true);
 
     server.on("/reboot-ap", HTTP_GET, []() {
         if (!server.authenticate(stored_web_user.c_str(), stored_web_pass.c_str())) {
