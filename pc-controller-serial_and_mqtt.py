@@ -47,7 +47,7 @@ class ConfigWindow(tk.Toplevel):
         self.entries = {}
         fields = [
             ("baud", "Default Baudrate:"),
-            ("esp_ip", "ESP32 Local IP:"),
+            ("esp_ip", "ESP Local IP:"),
             ("ws_port", "WebSocket Port:"),
             ("web_user", "Web Username:"),
             ("web_pass", "Web Password:", True),
@@ -114,7 +114,7 @@ class ArduinoControllerApp:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("ESP32 Home Automation (Serial / IP / MQTT)")
+        self.root.title("Home Automation Controller (Serial / IP / MQTT)")
         self.root.geometry("740x700")
         self.root.resizable(False, False)
 
@@ -227,7 +227,7 @@ class ArduinoControllerApp:
         top_bar.pack(fill="x", padx=10, pady=(10, 0))
 
         title_lbl = ttk.Label(
-            top_bar, text="ESP32 Home Automation", font=("Arial", 12, "bold")
+            top_bar, text="Home Automation Controller", font=("Arial", 12, "bold")
         )
         title_lbl.pack(side="left", padx=5)
 
@@ -329,17 +329,20 @@ class ArduinoControllerApp:
             d_sub, text="MIN (0)", command=lambda: self.send_command("DIMMER:0")
         ).pack(side="left", padx=5)
         ttk.Button(
-            d_sub, text="Step -", command=lambda: self.send_command("DIMM_DN")
+            d_sub, text="Step -", command=self.step_dimmer_down
         ).pack(side="left", padx=5)
 
-        self.dimmer_slider = ttk.Scale(d_sub, from_=0, to=9, orient="horizontal")
+        # Clean scale initialization without recursive command callbacks
+        self.dimmer_slider = ttk.Scale(
+            d_sub, from_=0, to=9, orient="horizontal"
+        )
         self.dimmer_slider.pack(
             side="left", expand=True, fill="x", padx=10, pady=5
         )
         self.dimmer_slider.bind("<ButtonRelease-1>", self.on_slider_release)
 
         ttk.Button(
-            d_sub, text="Step +", command=lambda: self.send_command("DIMM_UP")
+            d_sub, text="Step +", command=self.step_dimmer_up
         ).pack(side="left", padx=5)
         ttk.Button(
             d_sub, text="MAX (9)", command=lambda: self.send_command("DIMMER:9")
@@ -487,7 +490,7 @@ class ArduinoControllerApp:
         except Exception:
             pass
 
-    # --- WebSocket / IP Connection Logic with Basic Auth Header ---
+    # --- WebSocket / IP Connection Logic with JSON Authentication Payload ---
     def toggle_ip_connection(self):
         if not self.is_ip_connected:
             if self.is_connected:
@@ -499,7 +502,7 @@ class ArduinoControllerApp:
             w_pass = self.ip_pass_entry.get().strip()
 
             if not ip_address:
-                messagebox.showerror("Error", "Please enter a valid ESP32 IP address.")
+                messagebox.showerror("Error", "Please enter a valid ESP IP address.")
                 return
 
             self.config["esp_ip"] = ip_address
@@ -522,30 +525,28 @@ class ArduinoControllerApp:
             self.safe_log(f">> WebSocket Loop Error: {e}\n")
 
     async def ws_client_handler(self, ip, user, passwd):
-        import base64
         ws_port = self.config.get("ws_port", 81)
         uri = f"ws://{ip}:{ws_port}/"
-        
-        # Prepare HTTP Basic Authentication header if credentials are provided
-        extra_headers = {}
-        if user and passwd:
-            credentials = f"{user}:{passwd}"
-            encoded_credentials = base64.b64encode(credentials.encode("utf-8")).decode("utf-8")
-            extra_headers["Authorization"] = f"Basic {encoded_credentials}"
 
-        self.safe_log(f">> Connecting to WebSocket {uri} with authentication...\n")
+        self.safe_log(f">> Connecting to WebSocket {uri}...\n")
         try:
-            async with websockets.connect(uri, additional_headers=extra_headers) as websocket:
+            async with websockets.connect(uri) as websocket:
                 self.ws_connection = websocket
                 self.is_ip_connected = True
                 self.root.after(0, lambda: self.ip_connect_btn.config(text="Disconnect IP"))
                 self.root.after(0, lambda: self.ip_entry.config(state="disabled"))
                 self.root.after(0, lambda: self.ip_user_entry.config(state="disabled"))
                 self.root.after(0, lambda: self.ip_pass_entry.config(state="disabled"))
-                self.safe_log(f">> Connected to ESP32 WebSocket at {ip}!\n")
+                self.safe_log(f">> Connected to ESP WebSocket at {ip}. Authenticating...\n")
                 
-                # Request initial status
-                await websocket.send(json.dumps({"command": "STATUS"}))
+                # Transmit JSON authentication payload immediately on connection open
+                auth_payload = json.dumps({
+                    "auth": {
+                        "user": user,
+                        "pass": passwd
+                    }
+                })
+                await websocket.send(auth_payload)
 
                 async for message in websocket:
                     self.safe_log(f"<< {message}\n")
@@ -613,6 +614,22 @@ class ArduinoControllerApp:
         if val_int != self.last_sent_dimmer:
             self.last_sent_dimmer = val_int
             self.send_command(f"DIMMER:{val_int}")
+
+    def step_dimmer_up(self):
+        current_val = int(round(self.dimmer_slider.get()))
+        new_val = min(current_val + 1, 9)
+        self.dimmer_slider.set(new_val)
+        if new_val != self.last_sent_dimmer:
+            self.last_sent_dimmer = new_val
+            self.send_command(f"DIMMER:{new_val}")
+
+    def step_dimmer_down(self):
+        current_val = int(round(self.dimmer_slider.get()))
+        new_val = max(current_val - 1, 0)
+        self.dimmer_slider.set(new_val)
+        if new_val != self.last_sent_dimmer:
+            self.last_sent_dimmer = new_val
+            self.send_command(f"DIMMER:{new_val}")
 
     def read_serial(self):
         while self.is_connected:
