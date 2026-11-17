@@ -18,7 +18,7 @@ class ConfigWindow(tk.Toplevel):
     def __init__(self, parent, current_config, on_save_callback):
         super().__init__(parent)
         self.title("Connection & Protocol Configuration")
-        self.geometry("450x550")
+        self.geometry("450x620")
         self.resizable(False, False)
         self.config_data = current_config
         self.on_save_callback = on_save_callback
@@ -49,6 +49,8 @@ class ConfigWindow(tk.Toplevel):
             ("baud", "Default Baudrate:"),
             ("esp_ip", "ESP32 Local IP:"),
             ("ws_port", "WebSocket Port:"),
+            ("web_user", "Web Username:"),
+            ("web_pass", "Web Password:", True),
             ("mqtt_server", "MQTT Server:"),
             ("mqtt_port", "MQTT Port:"),
             ("mqtt_user", "MQTT Username:"),
@@ -62,7 +64,7 @@ class ConfigWindow(tk.Toplevel):
             is_pass = len(item) > 2 and item[2]
 
             row_frame = ttk.Frame(form_frame)
-            row_frame.pack(fill="x", pady=5)
+            row_frame.pack(fill="x", pady=4)
 
             ttk.Label(row_frame, text=label_text, width=16, anchor="w").pack(
                 side="left"
@@ -113,7 +115,7 @@ class ArduinoControllerApp:
     def __init__(self, root):
         self.root = root
         self.root.title("ESP32 Home Automation (Serial / IP / MQTT)")
-        self.root.geometry("620x680")
+        self.root.geometry("650x740")
         self.root.resizable(False, False)
 
         self.ser = None
@@ -144,6 +146,8 @@ class ArduinoControllerApp:
             "baud": 115200,
             "esp_ip": "192.168.29.110",
             "ws_port": 81,
+            "web_user": "admin",
+            "web_pass": "admin1234S",
             "mqtt_server": "i11b0026.ala.eu-central-1.emqxsl.com",
             "mqtt_port": 8883,
             "mqtt_user": "admin",
@@ -176,6 +180,8 @@ class ArduinoControllerApp:
             except ValueError:
                 pass
             self.config["esp_ip"] = self.ip_entry.get()
+            self.config["web_user"] = self.ip_user_entry.get()
+            self.config["web_pass"] = self.ip_pass_entry.get()
             self.save_config_to_disk()
 
             if hasattr(self, "mqtt_client"):
@@ -265,22 +271,31 @@ class ArduinoControllerApp:
         )
         self.connect_btn.grid(row=0, column=5, padx=5)
 
-        # --- IP / WEBSOCKET CONNECTION FRAME ---
+        # --- IP / WEBSOCKET CONNECTION FRAME WITH AUTH ---
         ip_frame = ttk.LabelFrame(
             self.root, text="IP / WebSocket Connection (Direct Over Wi-Fi)", padding=10
         )
         ip_frame.pack(fill="x", padx=10, pady=5)
 
-        ttk.Label(ip_frame, text="ESP32 IP:").grid(
-            row=0, column=0, sticky="w", padx=5
-        )
-        self.ip_entry = ttk.Entry(ip_frame, width=18)
-        self.ip_entry.grid(row=0, column=1, padx=5)
+        ip_grid_frame = ttk.Frame(ip_frame)
+        ip_grid_frame.pack(fill="x", expand=True)
+
+        ttk.Label(ip_grid_frame, text="ESP32 IP:").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+        self.ip_entry = ttk.Entry(ip_grid_frame, width=18)
+        self.ip_entry.grid(row=0, column=1, padx=5, pady=2)
+
+        ttk.Label(ip_grid_frame, text="User:").grid(row=0, column=2, sticky="w", padx=5, pady=2)
+        self.ip_user_entry = ttk.Entry(ip_grid_frame, width=12)
+        self.ip_user_entry.grid(row=0, column=3, padx=5, pady=2)
+
+        ttk.Label(ip_grid_frame, text="Pass:").grid(row=0, column=4, sticky="w", padx=5, pady=2)
+        self.ip_pass_entry = ttk.Entry(ip_grid_frame, width=12, show="*")
+        self.ip_pass_entry.grid(row=0, column=5, padx=5, pady=2)
 
         self.ip_connect_btn = ttk.Button(
             ip_frame, text="Connect IP", command=self.toggle_ip_connection
         )
-        self.ip_connect_btn.grid(row=0, column=2, padx=10)
+        self.ip_connect_btn.pack(pady=(8, 2))
 
         # --- RELAYS FRAME ---
         relay_frame = ttk.LabelFrame(self.root, text="Relay Controls", padding=10)
@@ -393,6 +408,8 @@ class ArduinoControllerApp:
         saved_port = self.config.get("port")
         saved_baud = self.config.get("baud")
         saved_ip = self.config.get("esp_ip")
+        saved_wuser = self.config.get("web_user", "admin")
+        saved_wpass = self.config.get("web_pass", "admin1234S")
         available_ports = list(self.port_combo["values"])
 
         if saved_baud:
@@ -405,6 +422,14 @@ class ArduinoControllerApp:
         if saved_ip:
             self.ip_entry.delete(0, tk.END)
             self.ip_entry.insert(0, str(saved_ip))
+
+        if saved_wuser:
+            self.ip_user_entry.delete(0, tk.END)
+            self.ip_user_entry.insert(0, str(saved_wuser))
+
+        if saved_wpass:
+            self.ip_pass_entry.delete(0, tk.END)
+            self.ip_pass_entry.insert(0, str(saved_wpass))
 
     def toggle_connection(self):
         if not self.is_connected:
@@ -462,7 +487,7 @@ class ArduinoControllerApp:
         except Exception:
             pass
 
-    # --- WebSocket / IP Connection Logic ---
+    # --- WebSocket / IP Connection Logic with Basic Auth Header ---
     def toggle_ip_connection(self):
         if not self.is_ip_connected:
             if self.is_connected:
@@ -470,37 +495,53 @@ class ArduinoControllerApp:
                 return
 
             ip_address = self.ip_entry.get().strip()
+            w_user = self.ip_user_entry.get().strip()
+            w_pass = self.ip_pass_entry.get().strip()
+
             if not ip_address:
                 messagebox.showerror("Error", "Please enter a valid ESP32 IP address.")
                 return
 
             self.config["esp_ip"] = ip_address
+            self.config["web_user"] = w_user
+            self.config["web_pass"] = w_pass
             self.save_config_to_disk()
 
             # Start WebSocket connection thread
-            self.ws_thread = threading.Thread(target=self.start_ws_client_thread, args=(ip_address,), daemon=True)
+            self.ws_thread = threading.Thread(target=self.start_ws_client_thread, args=(ip_address, w_user, w_pass), daemon=True)
             self.ws_thread.start()
         else:
             self.disconnect_ip()
 
-    def start_ws_client_thread(self, ip):
+    def start_ws_client_thread(self, ip, user, passwd):
         self.ws_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.ws_loop)
         try:
-            self.ws_loop.run_until_complete(self.ws_client_handler(ip))
+            self.ws_loop.run_until_complete(self.ws_client_handler(ip, user, passwd))
         except Exception as e:
             self.safe_log(f">> WebSocket Loop Error: {e}\n")
 
-    async def ws_client_handler(self, ip):
+    async def ws_client_handler(self, ip, user, passwd):
+        import base64
         ws_port = self.config.get("ws_port", 81)
         uri = f"ws://{ip}:{ws_port}/"
-        self.safe_log(f">> Connecting to WebSocket {uri}...\n")
+        
+        # Prepare HTTP Basic Authentication header if credentials are provided
+        extra_headers = {}
+        if user and passwd:
+            credentials = f"{user}:{passwd}"
+            encoded_credentials = base64.b64encode(credentials.encode("utf-8")).decode("utf-8")
+            extra_headers["Authorization"] = f"Basic {encoded_credentials}"
+
+        self.safe_log(f">> Connecting to WebSocket {uri} with authentication...\n")
         try:
-            async with websockets.connect(uri) as websocket:
+            async with websockets.connect(uri, additional_headers=extra_headers) as websocket:
                 self.ws_connection = websocket
                 self.is_ip_connected = True
                 self.root.after(0, lambda: self.ip_connect_btn.config(text="Disconnect IP"))
                 self.root.after(0, lambda: self.ip_entry.config(state="disabled"))
+                self.root.after(0, lambda: self.ip_user_entry.config(state="disabled"))
+                self.root.after(0, lambda: self.ip_pass_entry.config(state="disabled"))
                 self.safe_log(f">> Connected to ESP32 WebSocket at {ip}!\n")
                 
                 # Request initial status
@@ -516,6 +557,8 @@ class ArduinoControllerApp:
             self.ws_connection = None
             self.root.after(0, lambda: self.ip_connect_btn.config(text="Connect IP"))
             self.root.after(0, lambda: self.ip_entry.config(state="normal"))
+            self.root.after(0, lambda: self.ip_user_entry.config(state="normal"))
+            self.root.after(0, lambda: self.ip_pass_entry.config(state="normal"))
             self.safe_log(">> IP WebSocket Disconnected.\n")
 
     def disconnect_ip(self):
@@ -524,6 +567,8 @@ class ArduinoControllerApp:
         self.is_ip_connected = False
         self.ip_connect_btn.config(text="Connect IP")
         self.ip_entry.config(state="normal")
+        self.ip_user_entry.config(state="normal")
+        self.ip_pass_entry.config(state="normal")
 
     def toggle_relay(self, relay_num):
         idx = relay_num - 1
