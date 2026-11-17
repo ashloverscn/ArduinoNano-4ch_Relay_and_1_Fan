@@ -44,6 +44,9 @@ WebSocketsServer webSocket(81);
 WiFiClientSecure espClient;
 PubSubClient mqttClient(espClient);
 
+// --- WebSocket Authentication State Tracking ---
+bool wsAuthenticated[10] = {false};
+
 // --- Serial Buffering State (50ms Silence Timeout) ---
 String serialBuffer = "";
 unsigned long lastCharTime = 0;
@@ -241,8 +244,15 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
         ws.onopen = function(event) {
             reconnectAttempts = 0;
             updateConnectionBanner(true);
-            appendConsole("Connected to ESP32 WebSocket server.");
-            sendCommand('STATUS');
+            appendConsole("Connected. Authenticating WebSocket...");
+            
+            // Send automatic credentials handshake
+            ws.send(JSON.stringify({
+                auth: {
+                    user: "{{WEB_USER}}",
+                    pass: "{{WEB_PASS}}"
+                }
+            }));
         };
         
         ws.onclose = function(event) {
@@ -657,7 +667,7 @@ void setupOTARoutes(bool requireAuth) {
         HTTPUpload& upload = server.upload();
         if (upload.status == UPLOAD_FILE_START) {
             Serial.printf(">> [OTA] Update Start: %s\n", upload.filename.c_str());
-            if (!Update.begin(UPDATE_SIZE_UNKNOWN)) { // Start with unknown size for ESP32 stream chunking
+            if (!Update.begin(UPDATE_SIZE_UNKNOWN)) { 
                 Update.printError(Serial);
             }
         } else if (upload.status == UPLOAD_FILE_WRITE) {
@@ -665,7 +675,7 @@ void setupOTARoutes(bool requireAuth) {
                 Update.printError(Serial);
             }
         } else if (upload.status == UPLOAD_FILE_END) {
-            if (Update.end(true)) { // True to set the size to the current progress
+            if (Update.end(true)) { 
                 Serial.printf(">> [OTA] Update Success: %u bytes\nRebooting...\n", upload.totalSize);
             } else {
                 Update.printError(Serial);
@@ -758,18 +768,59 @@ void enterAPMode() {
     server.begin();
 }
 
-// --- WebSocket Event Callback ---
+// --- WebSocket Event Callback (Secured) ---
 void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
     switch (type) {
         case WStype_DISCONNECTED:
+            if (num < 10) wsAuthenticated[num] = false;
             break;
         case WStype_CONNECTED:
-            Serial.println("STATUS");
+            if (num < 10) wsAuthenticated[num] = false;
             break;
         case WStype_TEXT: {
             JsonDocument doc;
             DeserializationError error = deserializeJson(doc, payload, length);
-            if (!error && doc.containsKey("command")) {
+            if (error) break;
+
+            // 1. Handle Authentication Packet
+            if (doc.containsKey("auth")) {
+                JsonObject auth = doc["auth"];
+                String u = auth["user"] | "";
+                String p = auth["pass"] | "";
+                if (u == stored_web_user && p == stored_web_pass) {
+                    if (num < 10) wsAuthenticated[num] = true;
+                    JsonDocument resp;
+                    resp["type"] = "console_log";
+                    resp["message"] = ">> WebSocket authenticated successfully.";
+                    String out;
+                    serializeJson(resp, out);
+                    webSocket.sendTXT(num, out);
+                    
+                    Serial.println("STATUS");
+                } else {
+                    JsonDocument resp;
+                    resp["type"] = "console_log";
+                    resp["message"] = ">> WebSocket authentication failed!";
+                    String out;
+                    serializeJson(resp, out);
+                    webSocket.sendTXT(num, out);
+                }
+                break;
+            }
+
+            // 2. Reject commands if client is not authenticated
+            if (num < 10 && !wsAuthenticated[num]) {
+                JsonDocument resp;
+                resp["type"] = "console_log";
+                resp["message"] = ">> Unauthorized: Please authenticate first.";
+                String out;
+                serializeJson(resp, out);
+                webSocket.sendTXT(num, out);
+                break;
+            }
+
+            // 3. Process normal commands if authenticated
+            if (doc.containsKey("command")) {
                 String cmd = doc["command"].as<String>();
                 handleCommand(cmd);
             }
@@ -788,7 +839,7 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length) {
     }
     message.trim();
     
-    logMessage("<< [MQTT Received on " + String(topic) + "]: " + message);
+    logMessage(">> [MQTT Received on " + String(topic) + "]: " + message);
 
     if (String(topic) == mqtt_topic_cmd) {
         JsonDocument doc;
@@ -815,7 +866,7 @@ void reconnectMQTT() {
             if (mqttClient.connect(clientId.c_str(), mqtt_user.c_str(), mqtt_pass.c_str())) {
                 logMessage(">> MQTT Connected!");
                 mqttClient.subscribe(mqtt_topic_cmd.c_str());
-                lastMqttRetry = 0; // Reset retry tracking on successful connection
+                lastMqttRetry = 0; 
             } else {
                 logMessage(">> MQTT Connection failed, rc=" + String(mqttClient.state()) + ". Retrying in 5 minutes...");
             }
@@ -900,7 +951,10 @@ void setup() {
         if (!server.authenticate(stored_web_user.c_str(), stored_web_pass.c_str())) {
             return server.requestAuthentication();
         }
-        server.send_P(200, "text/html", HTML_TEMPLATE);
+        String html = FPSTR(HTML_TEMPLATE);
+        html.replace("{{WEB_USER}}", stored_web_user);
+        html.replace("{{WEB_PASS}}", stored_web_pass);
+        server.send(200, "text/html", html);
     });
 
     server.on("/config", HTTP_GET, []() {
