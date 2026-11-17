@@ -6,7 +6,7 @@
 ![MQTT](https://img.shields.io/badge/MQTT-TLS%2FSSL-success?logo=mqtt)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-A professional, feature-rich hybrid home automation firmware suite built around a robust **Master-Slave architecture**. An **ESP32 or ESP8266 microcontroller** acts as the intelligent master node (hosting responsive web dashboards and a secure cloud MQTT bridge), while an **ATmega328P microcontroller (Arduino Nano)** operates as the real-time slave node managing 4 lights, 1 fan dimmer, physical wall switches, and infrared remote controls.
+A professional, feature-rich hybrid home automation firmware suite built around a robust **Master-Slave architecture**. An **ESP32 or ESP8266 microcontroller** acts as the intelligent master node (hosting responsive web dashboards, secure web login authentication, over-the-air OTA updating, and a secure cloud MQTT bridge), while an **ATmega328P microcontroller (Arduino Nano)** operates as the real-time slave node managing 4 lights, 1 fan dimmer, physical wall switches, and infrared remote controls.
 
 ---
 
@@ -15,53 +15,57 @@ A professional, feature-rich hybrid home automation firmware suite built around 
 This implementation utilizes an Arduino Nano (ATmega328P) running a dedicated leading-edge AC phase control library to govern 4 lighting relay channels and 1 fan speed regulator, communicating bidirectionally with an ESP master module.
 
 ### Libraries Needed
-* **`EEPROM.h`** – Already present in Arduino core
-* **`IRremote.h`** – Available in Arduino Library Manager
-* **`AceButton.h`** – Available in Arduino Library Manager
-* **`arduino-timer.h`** – Available in Arduino Library Manager
-* **`atmega328_16mhz_ac_phase_control.h`** – [GitHub Repository](https://github.com/ashloverscn/atmega328-16mhz-ac-phase-control)
+- **`EEPROM.h`** – Already present in Arduino core
+- **`IRremote.h`** – Available in Arduino Library Manager
+- **`AceButton.h`** – Available in Arduino Library Manager
+- **`arduino-timer.h`** – Available in Arduino Library Manager
+- **`atmega328_16mhz_ac_phase_control.h`** – [GitHub Repository](https://github.com/ashloverscn/atmega328-16mhz-ac-phase-control)
 
 ### Related Reference & Inspiration
-* **Related Blog Post by Tech StudyCell:** [Arduino IoT Project with Google Assistant & Alexa](https://iotcircuithub.com/arduino-iot-project-with-google-assistant-alexa/)
+- **Related Blog Post by Tech StudyCell:** [Arduino IoT Project with Google Assistant & Alexa](https://iotcircuithub.com/arduino-iot-project-with-google-assistant-alexa/)
 
 ---
 
 ## 🛠️ Hardware PCBs & Schematics
 
 Custom printed circuit board (PCB) layouts and hardware schematics for this project are available across these repositories:
-* [4ch Relay & 1 Fan Arduino Nano PCB](https://github.com/ashloverscn/4ch-relay-1fan-arduino-nano-pcb)
-* [4ch SPDT Relay & 1 Fan Arduino Nano PCB](https://github.com/ashloverscn/4ch-spdt-relay-1fan-arduino-nano-pcb)
-* [4ch Relay & 1 Fan PCB](https://github.com/ashloverscn/4ch-relay-1fan-pcb)
-* [4ch SPDT Relay & 1 Fan PCB](https://github.com/ashloverscn/4ch-spdt-relay-1fan-pcb)
-* [Dimmer PCB](https://github.com/ashloverscn/dimmer-pcb)
-* [4ch Relay PCB](https://github.com/ashloverscn/4ch-relay-pcb)
-* [4ch SPDT Relay PCB](https://github.com/ashloverscn/4ch-spdt-relay-pcb)
+- [4ch Relay & 1 Fan Arduino Nano PCB](https://github.com/ashloverscn/4ch-relay-1fan-arduino-nano-pcb)
+- [4ch SPDT Relay & 1 Fan Arduino Nano PCB](https://github.com/ashloverscn/4ch-spdt-relay-1fan-arduino-nano-pcb)
+- [4ch Relay & 1 Fan PCB](https://github.com/ashloverscn/4ch-relay-1fan-pcb)
+- [4ch SPDT Relay & 1 Fan PCB](https://github.com/ashloverscn/4ch-spdt-relay-1fan-pcb)
+- [Dimmer PCB](https://github.com/ashloverscn/dimmer-pcb)
+- [4ch Relay PCB](https://github.com/ashloverscn/4ch-relay-pcb)
+- [4ch SPDT Relay PCB](https://github.com/ashloverscn/4ch-spdt-relay-pcb)
 
 ---
 
 ## 🚀 Key Features
 
 ### 1. Master-Slave Distributed Architecture
-* **Intelligent Offloading:** The ESP master handles high-level connectivity (Wi-Fi, WebSockets/AJAX web servers, TLS-secured MQTT cloud telemetry), while the ATmega328P slave handles time-critical, deterministic low-level operations.
-* **Serial UART Bridge:** Bidirectional command and telemetry exchange over serial UART (`115200 baud`) utilizing robust 50ms silence-timeout batch buffering and JSON payload formatting.
+- **Intelligent Offloading:** The ESP master handles high-level connectivity (Wi-Fi, WebSockets/AJAX web servers, HTTP Basic Authentication, TLS-secured MQTT cloud telemetry), while the ATmega328P slave handles time-critical, deterministic low-level operations.
+- **Serial UART Bridge:** Bidirectional command and telemetry exchange over serial UART (`115200 baud`) utilizing robust 50ms silence-timeout batch buffering and JSON payload formatting.
 
 ### 2. Multi-Channel Relay & AC Phase-Cut Fan Dimmer
-* **Appliance Switching:** Controls independent relay channels dedicated to 4 lights and ancillary loads.
-* **AC Phase-Cut Fan Dimmer:** Features a 10-stage dimmer (levels 0–9) utilizing a Zero-Crossing Detection (ZCD) interrupt (`INT0`) and hardware timers to trigger a TRIAC gate driver at precise microsecond phase delays.
-* **EEPROM State Persistence:** Automatically saves relay states and dimmer values to the ATmega328P's internal non-volatile EEPROM memory so settings survive power cycles.
+- **Appliance Switching:** Controls independent relay channels dedicated to 4 lights and ancillary loads.
+- **AC Phase-Cut Fan Dimmer:** Features a 10-stage dimmer (levels 0–9) utilizing a Zero-Crossing Detection (ZCD) interrupt (`INT0`) and hardware timers to trigger a TRIAC gate driver at precise microsecond phase delays.
+- **EEPROM State Persistence:** Automatically saves relay states and dimmer values to the ATmega328P's internal non-volatile EEPROM memory so settings survive power cycles.
 
 ### 3. Multi-Modal Input & Control Interfaces
-* **Embedded Web Dashboard:** Hosts a responsive, modern web UI with real-time state synchronization, live visual feedback, and a built-in serial debugging console.
-* **Flexible Wall Switch Support:** Operates with either traditional latching SPDT toggle switches or momentary tactile push-buttons (with built-in software debouncing via custom handlers or `AceButton`).
-* **Infrared (IR) Remote Control:** Decodes NEC-protocol infrared signals to toggle individual relays, step fan speeds up or down, or trigger master all-on/all-off actions.
+- **Embedded Web Dashboard:** Hosts a responsive, modern web UI with real-time state synchronization via WebSockets, live visual feedback, and a built-in serial debugging console. Protected via HTTP Basic Authentication (Default User: `admin` | Password: `admin1234S`).
+- **Flexible Wall Switch Support:** Operates with either traditional latching SPDT toggle switches or momentary tactile push-buttons (with built-in software debouncing via custom handlers or `AceButton`).
+- **Infrared (IR) Remote Control:** Decodes NEC-protocol infrared signals to toggle individual relays, step fan speeds up or down, or trigger master all-on/all-off actions.
 
 ### 4. Cloud Integration & Secure MQTT Telemetry
-* **TLS-Secured MQTT Client:** Connects securely over SSL/TLS (`WiFiClientSecure` on port `8883`) to cloud MQTT brokers (e.g., EMQX Cloud).
-* **Smart Home Ecosystem Ready:** Seamlessly integrates with automation platforms like **Home Assistant** or **Node-RED** via dedicated command and state topics.
+- **TLS-Secured MQTT Client:** Connects securely over SSL/TLS (`WiFiClientSecure` on port `8883`) to cloud MQTT brokers (e.g., EMQX Cloud).
+- **Smart Home Ecosystem Ready:** Seamlessly integrates with automation platforms like **Home Assistant** or **Node-RED** via dedicated command and state topics.
 
-### 5. Robust Configuration & Fallback Mechanism
-* **Soft-AP Configuration Portal:** If Wi-Fi connection fails for longer than 10 minutes, or if you long-press the onboard Boot button (`GPIO 0`) for 3 seconds, the ESP master automatically enters **Access Point (AP) Mode**.
-* **Web-Based Config Panel:** Connect directly to the AP (`ESP32-Setup-AP` / `ESP8266-Setup-AP`) and navigate to `/config` to update Wi-Fi credentials and MQTT broker parameters without re-flashing.
+### 5. Advanced Configuration, OTA Updates & Fallback Management
+- **Web Login Protection:** Both the main dashboard and configuration panel are secured behind HTTP Basic Authentication credentials stored in non-volatile flash memory (NVS).
+- **Over-The-Air (OTA) Firmware Flashing:** Easily upload compiled binary firmware (`.bin`) directly through the `/config` web interface without needing physical USB cable access.
+- **Soft-AP Configuration Portal & GPIO 0 Button Control:**
+  - **3-Second Long Press (GPIO 0):** Enters **AP Mode** instantly (`SSID: ESP32-Setup-AP` | `Password: 12345678`, Config portal at `http://192.168.4.1`).
+  - **10-Second Very Long Press (GPIO 0):** Triggers a **Full Factory Reset**, clearing NVS configuration storage and reverting defaults.
+  - **Automatic Fallback:** If Wi-Fi fails to connect for 10 continuous minutes, the module automatically boots into AP configuration mode.
 
 ---
 
@@ -91,11 +95,11 @@ Custom printed circuit board (PCB) layouts and hardware schematics for this proj
 
 ## 🔌 Serial Command & Protocol Reference
 
-* **Baud Rate:** `115200`
-* **Master ➔ Slave Command Syntax:**
+- **Baud Rate:** `115200`
+- **Master ➔ Slave Command Syntax:**
   * Relay control: `POWER1 ON`, `POWER1 OFF`, `POWER2 ON`, etc.
-  * Dimmer control: `DIMMER 0` through `DIMMER 9`, `DIMM_UP`, `DIMM_DN`
+  * Dimmer control: `DIMMER:0` through `DIMMER:9`, `DIMM_UP`, `DIMM_DN`
   * Global actions: `ALL_ON`, `ALL_OFF`, `STATUS`
-* **Slave ➔ Master Telemetry JSON Packet:**
+- **Slave ➔ Master Telemetry JSON Packet:**
   ```json
   {"POWER1":"ON", "POWER2":"OFF", "POWER3":"OFF", "POWER4":"OFF", "Dimmer":5}
