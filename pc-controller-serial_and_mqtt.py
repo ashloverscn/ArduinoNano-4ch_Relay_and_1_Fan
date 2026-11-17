@@ -115,7 +115,7 @@ class ArduinoControllerApp:
     def __init__(self, root):
         self.root = root
         self.root.title("ESP32 Home Automation (Serial / IP / MQTT)")
-        self.root.geometry("650x740")
+        self.root.geometry("740x700")
         self.root.resizable(False, False)
 
         self.ser = None
@@ -271,7 +271,7 @@ class ArduinoControllerApp:
         )
         self.connect_btn.grid(row=0, column=5, padx=5)
 
-        # --- IP / WEBSOCKET CONNECTION FRAME WITH AUTH ---
+        # --- IP / WEBSOCKET CONNECTION FRAME (SINGLE LINE) ---
         ip_frame = ttk.LabelFrame(
             self.root, text="IP / WebSocket Connection (Direct Over Wi-Fi)", padding=10
         )
@@ -280,22 +280,22 @@ class ArduinoControllerApp:
         ip_grid_frame = ttk.Frame(ip_frame)
         ip_grid_frame.pack(fill="x", expand=True)
 
-        ttk.Label(ip_grid_frame, text="ESP32 IP:").grid(row=0, column=0, sticky="w", padx=5, pady=2)
-        self.ip_entry = ttk.Entry(ip_grid_frame, width=18)
-        self.ip_entry.grid(row=0, column=1, padx=5, pady=2)
+        ttk.Label(ip_grid_frame, text="IP:").grid(row=0, column=0, sticky="w", padx=(2, 2))
+        self.ip_entry = ttk.Entry(ip_grid_frame, width=14)
+        self.ip_entry.grid(row=0, column=1, padx=2)
 
-        ttk.Label(ip_grid_frame, text="User:").grid(row=0, column=2, sticky="w", padx=5, pady=2)
-        self.ip_user_entry = ttk.Entry(ip_grid_frame, width=12)
-        self.ip_user_entry.grid(row=0, column=3, padx=5, pady=2)
+        ttk.Label(ip_grid_frame, text="User:").grid(row=0, column=2, sticky="w", padx=(6, 2))
+        self.ip_user_entry = ttk.Entry(ip_grid_frame, width=10)
+        self.ip_user_entry.grid(row=0, column=3, padx=2)
 
-        ttk.Label(ip_grid_frame, text="Pass:").grid(row=0, column=4, sticky="w", padx=5, pady=2)
-        self.ip_pass_entry = ttk.Entry(ip_grid_frame, width=12, show="*")
-        self.ip_pass_entry.grid(row=0, column=5, padx=5, pady=2)
+        ttk.Label(ip_grid_frame, text="Pass:").grid(row=0, column=4, sticky="w", padx=(6, 2))
+        self.ip_pass_entry = ttk.Entry(ip_grid_frame, width=10, show="*")
+        self.ip_pass_entry.grid(row=0, column=5, padx=2)
 
         self.ip_connect_btn = ttk.Button(
-            ip_frame, text="Connect IP", command=self.toggle_ip_connection
+            ip_grid_frame, text="Connect IP", command=self.toggle_ip_connection
         )
-        self.ip_connect_btn.pack(pady=(8, 2))
+        self.ip_connect_btn.grid(row=0, column=6, padx=(10, 2))
 
         # --- RELAYS FRAME ---
         relay_frame = ttk.LabelFrame(self.root, text="Relay Controls", padding=10)
