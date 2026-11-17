@@ -121,6 +121,9 @@ WebSocketsServer webSocket(81);
 WiFiClientSecure espClient;
 PubSubClient mqttClient(espClient);
 
+// --- WebSocket Authentication State Tracking ---
+bool wsAuthenticated[10] = {false};
+
 // --- Serial Buffering State (50ms Silence Timeout) ---
 String serialBuffer = "";
 unsigned long lastCharTime = 0;
@@ -318,8 +321,15 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
         ws.onopen = function(event) {
             reconnectAttempts = 0;
             updateConnectionBanner(true);
-            appendConsole("Connected to ESP8266 WebSocket server.");
-            sendCommand('STATUS');
+            appendConsole("Connected. Authenticating WebSocket...");
+            
+            // Send automatic credentials handshake
+            ws.send(JSON.stringify({
+                auth: {
+                    user: "{{WEB_USER}}",
+                    pass: "{{WEB_PASS}}"
+                }
+            }));
         };
         
         ws.onclose = function(event) {
@@ -840,18 +850,59 @@ void enterAPMode() {
     server.begin();
 }
 
-// --- WebSocket Event Callback ---
+// --- WebSocket Event Callback (Secured) ---
 void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
     switch (type) {
         case WStype_DISCONNECTED:
+            if (num < 10) wsAuthenticated[num] = false;
             break;
         case WStype_CONNECTED:
-            Serial.println("STATUS");
+            if (num < 10) wsAuthenticated[num] = false;
             break;
         case WStype_TEXT: {
             JsonDocument doc;
             DeserializationError error = deserializeJson(doc, payload, length);
-            if (!error && doc.containsKey("command")) {
+            if (error) break;
+
+            // 1. Handle Authentication Packet
+            if (doc.containsKey("auth")) {
+                JsonObject auth = doc["auth"];
+                String u = auth["user"] | "";
+                String p = auth["pass"] | "";
+                if (u == stored_web_user && p == stored_web_pass) {
+                    if (num < 10) wsAuthenticated[num] = true;
+                    JsonDocument resp;
+                    resp["type"] = "console_log";
+                    resp["message"] = ">> WebSocket authenticated successfully.";
+                    String out;
+                    serializeJson(resp, out);
+                    webSocket.sendTXT(num, out);
+                    
+                    Serial.println("STATUS");
+                } else {
+                    JsonDocument resp;
+                    resp["type"] = "console_log";
+                    resp["message"] = ">> WebSocket authentication failed!";
+                    String out;
+                    serializeJson(resp, out);
+                    webSocket.sendTXT(num, out);
+                }
+                break;
+            }
+
+            // 2. Reject commands if client is not authenticated
+            if (num < 10 && !wsAuthenticated[num]) {
+                JsonDocument resp;
+                resp["type"] = "console_log";
+                resp["message"] = ">> Unauthorized: Please authenticate first.";
+                String out;
+                serializeJson(resp, out);
+                webSocket.sendTXT(num, out);
+                break;
+            }
+
+            // 3. Process normal commands if authenticated
+            if (doc.containsKey("command")) {
                 String cmd = doc["command"].as<String>();
                 handleCommand(cmd);
             }
@@ -982,7 +1033,10 @@ void setup() {
         if (!server.authenticate(stored_web_user.c_str(), stored_web_pass.c_str())) {
             return server.requestAuthentication();
         }
-        server.send_P(200, "text/html", HTML_TEMPLATE);
+        String html = FPSTR(HTML_TEMPLATE);
+        html.replace("{{WEB_USER}}", stored_web_user);
+        html.replace("{{WEB_PASS}}", stored_web_pass);
+        server.send(200, "text/html", html);
     });
 
     server.on("/config", HTTP_GET, []() {
