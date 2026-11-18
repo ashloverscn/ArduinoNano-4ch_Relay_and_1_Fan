@@ -54,17 +54,18 @@ Custom printed circuit board (PCB) layouts and hardware schematics for this proj
 - **Embedded Web Dashboard:** Hosts a responsive, modern web UI with real-time state synchronization via WebSockets, live visual feedback, and a built-in serial debugging console. Protected via HTTP Basic Authentication (Default User: `admin` | Password: `admin1234S`).
 - **Flexible Wall Switch Support:** Operates with either traditional latching SPDT toggle switches or momentary tactile push-buttons (with built-in software debouncing via custom handlers or `AceButton`).
 - **Infrared (IR) Remote Control:** Decodes NEC-protocol infrared signals to toggle individual relays, step fan speeds up or down, or trigger master all-on/all-off actions.
+- **Multi-Platform Ecosystem Clients:** Includes a cross-platform Python Tkinter desktop utility (`arduino_controller.py`) and a native Android application (`HomeAutomationController.apk`) for seamless local Wi-Fi and cloud MQTT control.
 
 ### 4. Cloud Integration & Secure MQTT Telemetry
 - **TLS-Secured MQTT Client:** Connects securely over SSL/TLS (`WiFiClientSecure` on port `8883`) to cloud MQTT brokers (e.g., EMQX Cloud).
 - **Smart Home Ecosystem Ready:** Seamlessly integrates with automation platforms like **Home Assistant** or **Node-RED** via dedicated command and state topics.
 
 ### 5. Advanced Configuration, OTA Updates & Fallback Management
-- **Web Login Protection:** Both the main dashboard and configuration panel are secured behind HTTP Basic Authentication credentials stored in non-volatile flash memory (NVS).
+- **Web Login Protection:** Both the main dashboard and configuration panel are secured behind HTTP Basic Authentication credentials stored in non-volatile storage (NVS / EEPROM emulation).
 - **Over-The-Air (OTA) Firmware Flashing:** Easily upload compiled binary firmware (`.bin`) directly through the `/config` web interface without needing physical USB cable access.
 - **Soft-AP Configuration Portal & GPIO 0 Button Control:**
-  - **3-Second Long Press (GPIO 0):** Enters **AP Mode** instantly (`SSID: ESP32-Setup-AP` | `Password: 12345678`, Config portal at `http://192.168.4.1`).
-  - **10-Second Very Long Press (GPIO 0):** Triggers a **Full Factory Reset**, clearing NVS configuration storage and reverting defaults.
+  - **3-Second Long Press (GPIO 0):** Enters **AP Mode** instantly (`SSID: ESP32-Setup-AP` / `ESP8266-Setup-AP` | `Password: 12345678`, Config portal at `http://192.168.4.1`).
+  - **10-Second Very Long Press (GPIO 0):** Triggers a **Full Factory Reset**, clearing non-volatile configuration storage and reverting defaults.
   - **Automatic Fallback:** If Wi-Fi fails to connect for 10 continuous minutes, the module automatically boots into AP configuration mode.
 
 ---
@@ -82,10 +83,11 @@ Custom printed circuit board (PCB) layouts and hardware schematics for this proj
 | **TRIAC Gate** | `Digital 9` | Pin 15 (PB1) | AC Phase Dimmer Optocoupler Trigger (MOC3021 / BT136) |
 | **Zero-Cross Detect** | `Digital 2` | Pin 4 (PD2) | AC Zero-Crossing Optocoupler Interrupt (`INT0`) |
 | **IR Receiver** | `Digital 3` | Pin 5 (PD3) | TSOP1838 / VS1838B IR Demodulator Input (`INT1`) |
-| **Switch 1** | `Analog 0` (`A0`) | Pin 23 (PC0) | Wall Switch 1 (Internal pull-up enabled) |
-| **Switch 2** | `Analog 1` (`A1`) | Pin 24 (PC1) | Wall Switch 2 (Internal pull-up enabled) |
-| **Switch 3** | `Analog 2` (`A2`) | Pin 25 (PC2) | Wall Switch 3 (Internal pull-up enabled) |
-| **Switch 4** | `Analog 3` (`A3`) | Pin 26 (PC3) | Wall Switch 4 (Internal pull-up enabled) |
+| **Buzzer** | `Digital 4` | Pin 6 (PD4) | Software-driven acoustic buzzer feedback |
+| **Switch 1** | `Analog 0` (`A0`) | Pin 23 (PC0) | Wall Switch 1 (Latching SPDT toggle / Internal pull-up) |
+| **Switch 2** | `Analog 1` (`A1`) | Pin 24 (PC1) | Wall Switch 2 (Latching SPDT toggle / Internal pull-up) |
+| **Switch 3** | `Analog 2` (`A2`) | Pin 25 (PC2) | Wall Switch 3 (Latching SPDT toggle / Internal pull-up) |
+| **Switch 4** | `Analog 3` (`A3`) | Pin 26 (PC3) | Wall Switch 4 (Latching SPDT toggle / Internal pull-up) |
 | **Switch 5 / Fan Dn** | `Analog 4` (`A4`) | Pin 27 (PC4) | Fan Dimmer Decrease / Switch 5 Momentary Input |
 | **Switch 6 / Fan Up** | `Analog 5` (`A5`) | Pin 28 (PC5) | Fan Dimmer Increase / Switch 6 Momentary Input |
 | **UART RX** | `RX (Digital 0)`| Pin 2 (PD0) | Connected to Master (ESP32/ESP8266) TX pin |
@@ -97,9 +99,9 @@ Custom printed circuit board (PCB) layouts and hardware schematics for this proj
 
 - **Baud Rate:** `115200`
 - **Master ➔ Slave Command Syntax:**
-  * Relay control: `POWER1 ON`, `POWER1 OFF`, `POWER2 ON`, etc.
-  * Dimmer control: `DIMMER:0` through `DIMMER:9`, `DIMM_UP`, `DIMM_DN`
-  * Global actions: `ALL_ON`, `ALL_OFF`, `STATUS`
+  - Relay control: `POWER1 ON`, `POWER1 OFF`, `POWER2 ON`, etc.
+  - Dimmer control: `DIMMER:0` through `DIMMER:9`, `DIMM_UP`, `DIMM_DN`
+  - Global actions: `ALL_ON`, `ALL_OFF`, `STATUS`
 - **Slave ➔ Master Telemetry JSON Packet:**
   ```json
   {"POWER1":"ON", "POWER2":"OFF", "POWER3":"OFF", "POWER4":"OFF", "Dimmer":5}
