@@ -6,7 +6,17 @@
 ![MQTT](https://img.shields.io/badge/MQTT-TLS%2FSSL-success?logo=mqtt)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-A professional, feature-rich hybrid home automation firmware suite built around a robust **Master-Slave architecture**. An **ESP32 or ESP8266 microcontroller** acts as the intelligent master node (hosting responsive web dashboards, secure web login authentication, over-the-air OTA updating, and a secure cloud MQTT bridge), while an **ATmega328P microcontroller (Arduino Nano)** operates as the real-time slave node managing 4 lights, 1 fan dimmer, physical wall switches, and infrared remote controls.
+A professional, feature-rich hybrid home automation firmware suite built around a robust **Master-Slave architecture**. An **ESP32 or ESP8266 microcontroller** acts as the intelligent master node (hosting responsive web dashboards, secure web login authentication, over-the-air OTA updating, mDNS local domain resolution, and a secure cloud MQTT bridge), while an **ATmega328P microcontroller (Arduino Nano)** operates as the real-time slave node managing 4 lights, 1 fan dimmer, physical wall switches, and infrared remote controls.
+
+---
+
+## ⚡ HIGH VOLTAGE SAFETY WARNING
+
+> **DANGER: AC MAINS VOLTAGE (110V / 220V / 230V) IS PRESENT ON THIS BOARD!**
+> 
+> * Working with live AC electrical mains carries a **severe risk of electric shock, electrocution, fire, and fatal injury**.
+> * Always disconnect the main power supply (turn off the circuit breaker / MCB) before touching, wiring, inspecting, or installing any components connected to relays, TRIAC dimmers, optocouplers, or AC terminals.
+> * Ensure proper electrical isolation, enclosure housing, fusing, and grounding according to local electrical codes before applying live power. Never service the hardware while plugged in.
 
 ---
 
@@ -35,7 +45,7 @@ Custom printed circuit board (PCB) layouts and hardware schematics for this proj
 - [4ch SPDT Relay & 1 Fan PCB](https://github.com/ashloverscn/4ch-spdt-relay-1fan-pcb)
 - [Dimmer PCB](https://github.com/ashloverscn/dimmer-pcb)
 - [4ch Relay PCB](https://github.com/ashloverscn/4ch-relay-pcb)
-- [4ch SPDT Relay PCB](https://github.com/ashloverscn/4ch-spdt-relay-pcb)
+- [4ch SPDT Relay PCB](https://github.com/ashloverscn/4ch-spdt-relay-1fan-pcb)
 
 ---
 
@@ -52,6 +62,7 @@ Custom printed circuit board (PCB) layouts and hardware schematics for this proj
 
 ### 3. Multi-Modal Input & Control Interfaces
 - **Embedded Web Dashboard:** Hosts a responsive, modern web UI with real-time state synchronization via WebSockets, live visual feedback, and a built-in serial debugging console. Protected via HTTP Basic Authentication (Default User: `admin` | Password: `admin1234S`).
+- **mDNS Hostname Support:** Broadcasts a local network hostname (default: `http://homeautomationcontroller.local`) allowing seamless browser and application access without needing to lookup or configure static IP addresses.
 - **Flexible Wall Switch Support:** Operates with either traditional latching SPDT toggle switches or momentary tactile push-buttons (with built-in software debouncing via custom handlers or `AceButton`).
 - **Infrared (IR) Remote Control:** Decodes NEC-protocol infrared signals to toggle individual relays, step fan speeds up or down, or trigger master all-on/all-off actions.
 - **Multi-Platform Ecosystem Clients:** Includes a cross-platform Python Tkinter desktop utility (`arduino_controller.py`) and a native Android application (`HomeAutomationController.apk`) for seamless local Wi-Fi and cloud MQTT control.
