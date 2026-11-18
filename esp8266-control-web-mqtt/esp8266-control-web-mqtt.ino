@@ -537,7 +537,7 @@ const char CONFIG_PAGE[] PROGMEM = R"rawliteral(
         <label>Wi-Fi Password:</label>
         <input type="password" name="wifi_pass" id="cfg_pass_wifi">
 
-        <label>Device Hostname (mDNS):</label>
+        <label>Device Hostname:</label>
         <input type="text" name="mdns_name" id="cfg_mdns">
 
         <hr>
