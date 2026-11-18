@@ -7,12 +7,14 @@
 #include <PubSubClient.h>
 #include <Preferences.h>
 #include <Update.h>
+#include <ESPmDNS.h>
 
 Preferences preferences;
 
-// --- Default Fallback Credentials (Pre-filled on first boot) ---
+// --- Default Fallback Credentials & Hostname ---
 const char* DEFAULT_SSID = "ash_jio_2G";
 const char* DEFAULT_PASSWORD = "ThundersnO0w@,,#";
+const char* DEFAULT_MDNS_NAME = "homeautomationcontroller";
 
 const char* DEFAULT_MQTT_SERVER = "i11b0026.ala.eu-central-1.emqxsl.com";
 const int   DEFAULT_MQTT_PORT = 8883;
@@ -28,6 +30,7 @@ const char* DEFAULT_WEB_PASS = "admin1234S";
 // --- Runtime Configuration Variables ---
 String stored_ssid;
 String stored_password;
+String stored_mdns;
 String mqtt_server;
 int mqtt_port;
 String mqtt_user;
@@ -70,7 +73,7 @@ bool apModeActive = false;
 
 // Forward declarations
 void loadConfig();
-void saveConfig(String ssid, String pass, String srv, int prt, String usr, String pwd, String tCmd, String tState, bool mEnabled, String wUser, String wPass);
+void saveConfig(String ssid, String pass, String mdnsName, String srv, int prt, String usr, String pwd, String tCmd, String tState, bool mEnabled, String wUser, String wPass);
 void logMessage(const String& msg);
 void handleCommand(const String& cmd);
 void processBufferedSerial(const String& data);
@@ -449,12 +452,15 @@ const char CONFIG_PAGE[] PROGMEM = R"rawliteral(
     <h2>Device Configuration</h2>
     
     <form action="/save-settings" method="POST">
-        <h3>Wi-Fi Settings</h3>
+        <h3>Wi-Fi & Network Settings</h3>
         <label>Wi-Fi SSID:</label>
         <input type="text" name="wifi_ssid" id="cfg_ssid">
         
         <label>Wi-Fi Password:</label>
         <input type="password" name="wifi_pass" id="cfg_pass_wifi">
+
+        <label>Device Hostname (mDNS):</label>
+        <input type="text" name="mdns_name" id="cfg_mdns">
 
         <hr>
         
@@ -515,6 +521,7 @@ const char CONFIG_PAGE[] PROGMEM = R"rawliteral(
         .then(data => {
             document.getElementById('cfg_ssid').value = data.ssid || '';
             document.getElementById('cfg_pass_wifi').value = data.pass_wifi || '';
+            document.getElementById('cfg_mdns').value = data.mdns || 'homeautomationcontroller';
             document.getElementById('cfg_enabled').checked = data.enabled === 1 || data.enabled === true;
             document.getElementById('cfg_server').value = data.server;
             document.getElementById('cfg_port').value = data.port;
@@ -536,6 +543,7 @@ void loadConfig() {
     preferences.begin("config", false);
     stored_ssid = preferences.getString("ssid", DEFAULT_SSID);
     stored_password = preferences.getString("password", DEFAULT_PASSWORD);
+    stored_mdns = preferences.getString("mdns", DEFAULT_MDNS_NAME);
     mqtt_server = preferences.getString("server", DEFAULT_MQTT_SERVER);
     mqtt_port = preferences.getInt("port", DEFAULT_MQTT_PORT);
     mqtt_user = preferences.getString("user", DEFAULT_MQTT_USER);
@@ -546,6 +554,9 @@ void loadConfig() {
     stored_web_user = preferences.getString("wuser", DEFAULT_WEB_USER);
     stored_web_pass = preferences.getString("wpass", DEFAULT_WEB_PASS);
 
+    if (stored_mdns.length() == 0 || stored_mdns.length() > 32) {
+        stored_mdns = DEFAULT_MDNS_NAME;
+    }
     if (stored_web_user.length() == 0 || stored_web_user.length() > 32) {
         stored_web_user = DEFAULT_WEB_USER;
     }
@@ -555,10 +566,11 @@ void loadConfig() {
     preferences.end();
 }
 
-void saveConfig(String ssid, String pass, String srv, int prt, String usr, String pwd, String tCmd, String tState, bool mEnabled, String wUser, String wPass) {
+void saveConfig(String ssid, String pass, String mdnsName, String srv, int prt, String usr, String pwd, String tCmd, String tState, bool mEnabled, String wUser, String wPass) {
     preferences.begin("config", false);
     preferences.putString("ssid", ssid);
     preferences.putString("password", pass);
+    preferences.putString("mdns", mdnsName);
     preferences.putString("server", srv);
     preferences.putInt("port", prt);
     preferences.putString("user", usr);
@@ -699,6 +711,11 @@ void enterAPMode() {
         logMessage(">> Failed to start AP Mode!");
     }
 
+    // Initialize mDNS in AP Mode too
+    if (MDNS.begin(stored_mdns.c_str())) {
+        logMessage(">> mDNS responder started in AP mode: http://" + stored_mdns + ".local");
+    }
+
     webSocket.close();
     server.stop();
 
@@ -714,6 +731,7 @@ void enterAPMode() {
         JsonDocument doc;
         doc["ssid"] = stored_ssid;
         doc["pass_wifi"] = stored_password;
+        doc["mdns"] = stored_mdns;
         doc["enabled"] = mqtt_enabled;
         doc["server"] = mqtt_server;
         doc["port"] = mqtt_port;
@@ -731,6 +749,7 @@ void enterAPMode() {
     server.on("/save-settings", HTTP_POST, []() {
         String s_ssid = server.hasArg("wifi_ssid") ? server.arg("wifi_ssid") : DEFAULT_SSID;
         String s_pass = server.hasArg("wifi_pass") ? server.arg("wifi_pass") : DEFAULT_PASSWORD;
+        String s_mdns = server.hasArg("mdns_name") && server.arg("mdns_name") != "" ? server.arg("mdns_name") : DEFAULT_MDNS_NAME;
         bool mEnabled = server.hasArg("mqtt_enabled");
         String srv = server.hasArg("mqtt_server") ? server.arg("mqtt_server") : DEFAULT_MQTT_SERVER;
         int prt = server.hasArg("mqtt_port") ? server.arg("mqtt_port").toInt() : DEFAULT_MQTT_PORT;
@@ -741,7 +760,7 @@ void enterAPMode() {
         String wUser = server.hasArg("web_user") && server.arg("web_user") != "" ? server.arg("web_user") : DEFAULT_WEB_USER;
         String wPass = server.hasArg("web_pass") && server.arg("web_pass") != "" ? server.arg("web_pass") : DEFAULT_WEB_PASS;
 
-        saveConfig(s_ssid, s_pass, srv, prt, usr, pwd, tCmd, tState, mEnabled, wUser, wPass);
+        saveConfig(s_ssid, s_pass, s_mdns, srv, prt, usr, pwd, tCmd, tState, mEnabled, wUser, wPass);
 
         server.send(200, "text/html", "<h3>Settings Saved! Restarting ESP32...</h3><script>setTimeout(()=>{window.location='/'}, 4000);</script>");
         delay(1000);
@@ -940,6 +959,16 @@ void setup() {
         }
     }
 
+    // --- mDNS Start Initialization in Normal Mode ---
+    if (WiFi.status() == WL_CONNECTED) {
+        if (MDNS.begin(stored_mdns.c_str())) {
+            Serial.println(">> mDNS responder started: http://" + stored_mdns + ".local");
+        } else {
+            Serial.println(">> Error setting up MDNS responder!");
+        }
+    }
+    // ------------------------------------------------
+
     if (mqtt_enabled) {
         espClient.setInsecure();
         mqttClient.setServer(mqtt_server.c_str(), mqtt_port);
@@ -971,6 +1000,7 @@ void setup() {
         JsonDocument doc;
         doc["ssid"] = stored_ssid;
         doc["pass_wifi"] = stored_password;
+        doc["mdns"] = stored_mdns;
         doc["enabled"] = mqtt_enabled;
         doc["server"] = mqtt_server;
         doc["port"] = mqtt_port;
@@ -991,6 +1021,7 @@ void setup() {
         }
         String s_ssid = server.hasArg("wifi_ssid") ? server.arg("wifi_ssid") : DEFAULT_SSID;
         String s_pass = server.hasArg("wifi_pass") ? server.arg("wifi_pass") : DEFAULT_PASSWORD;
+        String s_mdns = server.hasArg("mdns_name") && server.arg("mdns_name") != "" ? server.arg("mdns_name") : DEFAULT_MDNS_NAME;
         bool mEnabled = server.hasArg("mqtt_enabled");
         String srv = server.hasArg("mqtt_server") ? server.arg("mqtt_server") : DEFAULT_MQTT_SERVER;
         int prt = server.hasArg("mqtt_port") ? server.arg("mqtt_port").toInt() : DEFAULT_MQTT_PORT;
@@ -1001,7 +1032,7 @@ void setup() {
         String wUser = server.hasArg("web_user") && server.arg("web_user") != "" ? server.arg("web_user") : DEFAULT_WEB_USER;
         String wPass = server.hasArg("web_pass") && server.arg("web_pass") != "" ? server.arg("web_pass") : DEFAULT_WEB_PASS;
 
-        saveConfig(s_ssid, s_pass, srv, prt, usr, pwd, tCmd, tState, mEnabled, wUser, wPass);
+        saveConfig(s_ssid, s_pass, s_mdns, srv, prt, usr, pwd, tCmd, tState, mEnabled, wUser, wPass);
 
         server.send(200, "text/html", "<h3>Settings Saved! Restarting ESP32...</h3><script>setTimeout(()=>{window.location='/'}, 4000);</script>");
         delay(1000);
