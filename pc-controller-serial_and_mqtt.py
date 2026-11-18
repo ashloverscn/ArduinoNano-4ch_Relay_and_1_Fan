@@ -13,12 +13,12 @@ CONFIG_FILE = "arduino_config.json"
 
 
 class ConfigWindow(tk.Toplevel):
-    """Dedicated Configuration Window for Serial, MQTT & IP/WebSocket Settings"""
+    """Dedicated Configuration Window for Serial, MQTT & Port Settings"""
 
     def __init__(self, parent, current_config, on_save_callback):
         super().__init__(parent)
         self.title("Connection & Protocol Configuration")
-        self.geometry("450x620")
+        self.geometry("450x520")
         self.resizable(False, False)
         self.config_data = current_config
         self.on_save_callback = on_save_callback
@@ -45,12 +45,10 @@ class ConfigWindow(tk.Toplevel):
         form_frame.pack(fill="both", expand=True, pady=5)
 
         self.entries = {}
+        # Hostname (esp_ip) and credentials (web_user, web_pass) removed from here
         fields = [
             ("baud", "Default Baudrate:"),
-            ("esp_ip", "ESP Local IP:"),
             ("ws_port", "WebSocket Port:"),
-            ("web_user", "Web Username:"),
-            ("web_pass", "Web Password:", True),
             ("mqtt_server", "MQTT Server:"),
             ("mqtt_port", "MQTT Port:"),
             ("mqtt_user", "MQTT Username:"),
@@ -179,9 +177,12 @@ class ArduinoControllerApp:
                 self.config["baud"] = int(self.baud_entry.get())
             except ValueError:
                 pass
-            self.config["esp_ip"] = self.ip_entry.get()
-            self.config["web_user"] = self.ip_user_entry.get()
-            self.config["web_pass"] = self.ip_pass_entry.get()
+            
+            # Capture Hostname (esp_ip) and credentials directly from main page fields
+            self.config["esp_ip"] = self.ip_entry.get().strip()
+            self.config["web_user"] = self.ip_user_entry.get().strip()
+            self.config["web_pass"] = self.ip_pass_entry.get().strip()
+            
             self.save_config_to_disk()
 
             if hasattr(self, "mqtt_client"):
@@ -218,6 +219,12 @@ class ArduinoControllerApp:
             self.safe_log(f"MQTT Connection Error: {e}\n")
 
     def open_config_window(self):
+        # Capture latest values from main dashboard entries before opening config window
+        self.config["esp_ip"] = self.ip_entry.get().strip()
+        self.config["web_user"] = self.ip_user_entry.get().strip()
+        self.config["web_pass"] = self.ip_pass_entry.get().strip()
+        self.save_config_to_disk()
+        
         ConfigWindow(
             self.root, self.config, self.update_config_from_dialog
         )
