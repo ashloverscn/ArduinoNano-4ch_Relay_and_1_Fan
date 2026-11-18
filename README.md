@@ -6,7 +6,7 @@
 ![MQTT](https://img.shields.io/badge/MQTT-TLS%2FSSL-success?logo=mqtt)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-A professional, feature-rich hybrid home automation firmware suite built around a robust **Master-Slave architecture**. An **ESP32 or ESP8266 microcontroller** acts as the intelligent master node (hosting responsive web dashboards, secure web login authentication, over-the-air OTA updating, mDNS local domain resolution, and a secure cloud MQTT bridge), while an **ATmega328P microcontroller (Arduino Nano)** operates as the real-time slave node managing 4 lights, 1 fan dimmer, physical wall switches, and infrared remote controls.
+A professional, feature-rich hybrid home automation firmware suite built around a robust **Master-Slave architecture**. An **ESP32 or ESP8266 microcontroller** acts as the intelligent master node (hosting responsive web dashboards, secure web login authentication, over-the-air OTA updating, mDNS local domain resolution for both station and AP modes, and a secure cloud MQTT bridge), while an **ATmega328P microcontroller (Arduino Nano)** operates as the real-time slave node managing 4 lights, 1 fan dimmer, physical wall switches, and infrared remote controls.
 
 ---
 
@@ -62,7 +62,7 @@ Custom printed circuit board (PCB) layouts and hardware schematics for this proj
 
 ### 3. Multi-Modal Input & Control Interfaces
 - **Embedded Web Dashboard:** Hosts a responsive, modern web UI with real-time state synchronization via WebSockets, live visual feedback, and a built-in serial debugging console. Protected via HTTP Basic Authentication (Default User: `admin` | Password: `admin1234S`).
-- **mDNS Hostname Support:** Broadcasts a local network hostname (default: `http://homeautomationcontroller.local`) allowing seamless browser and application access without needing to lookup or configure static IP addresses.
+- **mDNS Hostname Support:** Broadcasts a local network hostname (default: `http://homeautomationcontroller.local`) across both station and AP modes, allowing seamless browser and application access without needing to type IP addresses.
 - **Flexible Wall Switch Support:** Operates with either traditional latching SPDT toggle switches or momentary tactile push-buttons (with built-in software debouncing via custom handlers or `AceButton`).
 - **Infrared (IR) Remote Control:** Decodes NEC-protocol infrared signals to toggle individual relays, step fan speeds up or down, or trigger master all-on/all-off actions.
 - **Multi-Platform Ecosystem Clients:** Includes a cross-platform Python Tkinter desktop utility (`arduino_controller.py`) and a native Android application (`HomeAutomationController.apk`) for seamless local Wi-Fi and cloud MQTT control.
@@ -75,7 +75,7 @@ Custom printed circuit board (PCB) layouts and hardware schematics for this proj
 - **Web Login Protection:** Both the main dashboard and configuration panel are secured behind HTTP Basic Authentication credentials stored in non-volatile storage (NVS / EEPROM emulation).
 - **Over-The-Air (OTA) Firmware Flashing:** Easily upload compiled binary firmware (`.bin`) directly through the `/config` web interface without needing physical USB cable access.
 - **Soft-AP Configuration Portal & GPIO 0 Button Control:**
-  - **3-Second Long Press (GPIO 0):** Enters **AP Mode** instantly (`SSID: ESP32-Setup-AP` / `ESP8266-Setup-AP` | `Password: 12345678`, Config portal at `http://192.168.4.1`).
+  - **3-Second Long Press (GPIO 0):** Enters **AP Mode** instantly (`SSID: ESP32-Setup-AP` / `ESP8266-Setup-AP` | `Password: 12345678`, Config portal accessible via IP `http://192.168.4.1` or mDNS hostname `http://homeautomationcontroller.local`).
   - **10-Second Very Long Press (GPIO 0):** Triggers a **Full Factory Reset**, clearing non-volatile configuration storage and reverting defaults.
   - **Automatic Fallback:** If Wi-Fi fails to connect for 10 continuous minutes, the module automatically boots into AP configuration mode.
 
