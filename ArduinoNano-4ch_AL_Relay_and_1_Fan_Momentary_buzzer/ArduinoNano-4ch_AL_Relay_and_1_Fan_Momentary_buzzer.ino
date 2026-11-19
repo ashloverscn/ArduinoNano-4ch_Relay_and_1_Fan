@@ -128,12 +128,12 @@ void beep(unsigned int frequency, unsigned long duration)
 
 void beepStateChanged()
 {
-  beep(2500, 35);
+  beep(1100, 90);
 }
 
 void beepNoChange()
 {
-  beep(1200, 100);
+  beep(1400, 80);
 }
 
 void applyDimmer()
