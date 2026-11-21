@@ -1,2 +1,3 @@
 use esp32 from espressif systems and 
 core version 3.3.x (only for sinric compatiblity)
+SinricPro verison is availabel after esp32 we are running out of memoryso no more esp8266 only esp32
