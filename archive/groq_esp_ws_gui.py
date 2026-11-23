@@ -16,6 +16,14 @@ from openai import OpenAI
 
 DEFAULT_GROQ_API_KEY = "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"
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
+AVAILABLE_GROQ_MODELS = [
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "qwen/qwen3.8-27b",
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+    "minimaxai/minimax-m2.7",
+]
 FALLBACK_GROQ_MODELS = [
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
@@ -372,7 +380,10 @@ def speak_short_message(text: str, max_chars: int = 140, log_fn=None):
 def list_groq_models(api_key: str | None) -> list[str]:
     client = OpenAI(api_key=resolve_groq_api_key(api_key), base_url=GROQ_BASE_URL)
     models = client.models.list()
-    return [getattr(m, "id", "") for m in models.data if getattr(m, "id", "")]
+    model_ids = [getattr(m, "id", "") for m in models.data if getattr(m, "id", "")]
+    non_chat_prefixes = ("whisper-", "canopylabs/", "meta-llama/llama-prompt-guard")
+    chat_models = [m for m in model_ids if not m.startswith(non_chat_prefixes)]
+    return chat_models or model_ids
 
 
 def transcribe_wav_groq(wav_bytes: bytes, api_key: str | None, log_fn=None) -> str:
@@ -594,9 +605,14 @@ class GroqESPControllerGUI:
         ).pack(side="left", padx=(0, 10))
 
         ttk.Label(key_frame, text="Model:").pack(side="left")
-        self.model_entry = ttk.Entry(key_frame, width=22)
-        self.model_entry.insert(0, DEFAULT_GROQ_MODEL)
-        self.model_entry.pack(side="left", padx=(6, 6))
+        self.model_combo = ttk.Combobox(
+            key_frame,
+            values=list(AVAILABLE_GROQ_MODELS),
+            width=26,
+            state="readonly",
+        )
+        self.model_combo.set(DEFAULT_GROQ_MODEL)
+        self.model_combo.pack(side="left", padx=(6, 6))
 
         ttk.Button(key_frame, text="List Models", command=self.check_models).pack(side="left")
 
@@ -743,7 +759,7 @@ class GroqESPControllerGUI:
                 return
 
             api_key = self.api_key_entry.get().strip()
-            model_name = self.model_entry.get().strip()
+            model_name = self.model_combo.get().strip()
 
             def _voice_flow():
                 transcript = transcribe_wav_groq(wav_bytes, api_key, log_fn=self.safe_log)
@@ -772,6 +788,22 @@ class GroqESPControllerGUI:
         def worker():
             try:
                 models = list_groq_models(api_key)
+                if models:
+                    def _update_combo():
+                        current = self.model_combo.get().strip()
+                        merged = []
+                        for m in [DEFAULT_GROQ_MODEL] + models:
+                            if m not in merged:
+                                merged.append(m)
+                        self.model_combo["values"] = merged
+                        if current in merged:
+                            self.model_combo.set(current)
+                        elif DEFAULT_GROQ_MODEL in merged:
+                            self.model_combo.set(DEFAULT_GROQ_MODEL)
+                        else:
+                            self.model_combo.set(merged[0])
+
+                    self.root.after(0, _update_combo)
                 preview = ", ".join(models[:15])
                 self.safe_log(f"[Groq Models] {preview}\n")
             except Exception as e:
@@ -806,7 +838,7 @@ class GroqESPControllerGUI:
         if not prompt or self.is_running_prompt or self.is_recording:
             return
         api_key = self.api_key_entry.get().strip()
-        model_name = self.model_entry.get().strip()
+        model_name = self.model_combo.get().strip()
         self._run_worker(
             label=f"[You] {prompt}",
             fn=lambda: run_groq_intent(prompt, self.esp_client, api_key, model_name, log_fn=self.safe_log),
