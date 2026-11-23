@@ -496,6 +496,7 @@ class GroqESPControllerGUI:
     def _build_ui(self):
         pad = {"padx": 10, "pady": 5}
 
+        # --- WebSocket Connection Frame ---
         ws_frame = ttk.LabelFrame(self.root, text="ESP WebSocket Connection", padding=8)
         ws_frame.pack(fill="x", **pad)
 
@@ -525,6 +526,7 @@ class GroqESPControllerGUI:
         self.status_lbl = ttk.Label(ws_frame, text="Disconnected", foreground="#b00020")
         self.status_lbl.grid(row=0, column=9, sticky="w")
 
+        # --- Relays Frame (Relays 1-4) ---
         relay_frame = ttk.LabelFrame(self.root, text="Relay Controls", padding=8)
         relay_frame.pack(fill="x", **pad)
 
@@ -543,6 +545,7 @@ class GroqESPControllerGUI:
             btn.pack(side="left", expand=True, padx=5, pady=2)
             self.relay_buttons.append(btn)
 
+        # --- Dimmer Frame (0-9 + MIN / Step - / Slider / Step + / MAX) ---
         dimmer_frame = ttk.LabelFrame(self.root, text="Dimmer Control (0-9)", padding=8)
         dimmer_frame.pack(fill="x", **pad)
 
@@ -562,6 +565,7 @@ class GroqESPControllerGUI:
         ttk.Button(d_sub, text="Step +", command=self.step_dimmer_up).pack(side="left", padx=4)
         ttk.Button(d_sub, text="MAX (9)", command=lambda: self.set_dimmer_direct(9)).pack(side="left", padx=4)
 
+        # --- Global & Utils Frame ---
         global_frame = ttk.LabelFrame(self.root, text="Global Commands & Status", padding=8)
         global_frame.pack(fill="x", **pad)
 
@@ -572,6 +576,7 @@ class GroqESPControllerGUI:
         ttk.Button(g_sub, text="ALL OFF", command=self.send_all_off).pack(side="left", expand=True, padx=5)
         ttk.Button(g_sub, text="Get Status", command=self.send_status_cmd).pack(side="left", expand=True, padx=5)
 
+        # --- Groq API Key & Model Frame ---
         key_frame = ttk.LabelFrame(self.root, text="Groq API Configuration", padding=8)
         key_frame.pack(fill="x", **pad)
 
@@ -595,6 +600,7 @@ class GroqESPControllerGUI:
 
         ttk.Button(key_frame, text="List Models", command=self.check_models).pack(side="left")
 
+        # --- Natural Language & Default Mic Frame ---
         prompt_frame = ttk.LabelFrame(self.root, text="Intent Command (Text or Default Mic)", padding=8)
         prompt_frame.pack(fill="x", **pad)
 
@@ -609,21 +615,9 @@ class GroqESPControllerGUI:
         self.mic_btn = ttk.Button(prompt_frame, text="Speak (Default Mic)", command=self.toggle_voice_recording)
         self.mic_btn.pack(side="left")
 
+        # --- Speaker Toggle ---
         quick_frame = ttk.Frame(self.root)
         quick_frame.pack(fill="x", padx=10, pady=(0, 4))
-
-        samples = [
-            ("Relay 1 ON", "Turn on relay 1."),
-            ("All Relays OFF", "Turn off all relays."),
-            ("Dimmer 5", "Set the dimmer to 5."),
-            ("Check Status", "What is the current relay and dimmer status?"),
-        ]
-        for label, sample_prompt in samples:
-            ttk.Button(
-                quick_frame,
-                text=label,
-                command=lambda p=sample_prompt: self._use_sample_prompt(p),
-            ).pack(side="left", padx=(0, 6))
 
         self.speak_reply_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
@@ -632,6 +626,7 @@ class GroqESPControllerGUI:
             variable=self.speak_reply_var,
         ).pack(side="right")
 
+        # --- Console / Assistant Output Log ---
         log_frame = ttk.LabelFrame(self.root, text="Assistant Response & WebSocket Log", padding=8)
         log_frame.pack(fill="both", expand=True, **pad)
 
@@ -642,6 +637,7 @@ class GroqESPControllerGUI:
 
         ttk.Button(log_frame, text="Clear Log", command=self.clear_log).pack(anchor="e", pady=(6, 0))
 
+    # --- Manual Hardware Controls ---
     def toggle_relay(self, relay_num: int):
         idx = relay_num - 1
         target_state = not self.relay_states[idx]
@@ -700,11 +696,7 @@ class GroqESPControllerGUI:
         except Exception:
             pass
 
-    def _use_sample_prompt(self, text: str):
-        self.prompt_entry.delete(0, tk.END)
-        self.prompt_entry.insert(0, text)
-        self.send_text_intent()
-
+    # --- Voice & Groq Intent Controls ---
     def toggle_voice_recording(self):
         if self.is_running_prompt:
             return
