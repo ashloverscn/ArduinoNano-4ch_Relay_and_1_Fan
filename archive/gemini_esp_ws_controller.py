@@ -14,22 +14,14 @@ import websockets
 from google import genai
 from google.genai import types
 
-DEFAULT_GEMINI_API_KEY = "AQ.Ab8RN6JG-neUpLygq9Mmdx7AufZX6fqjWifuJKiVZ-j737i_mw"
-DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
-FALLBACK_GEMINI_MODELS = [
-    "gemini-3.8-flash",
-    "gemini-3.5-flash-lite",
-    "gemini-3.1-flash-lite",
-    "gemini-3.6-flash",
-]
+DEFAULT_GEMINI_API_KEY = "AQ.Ab8RN6KXlOcuznpIESkRNMMd_nVTcNitfMHv9VfcNmd_9v_UCg"
+GEMINI_MODEL = "gemini-3.5-flash-lite"
 
 MIC_SAMPLE_RATE = 16000
 MAX_RECORD_SECONDS = 6
 
 
 class ESPWebSocketClient:
-    """Persistent WebSocket client with immediate JSON auth and thread-safe command sending."""
-
     def __init__(
         self,
         esp_ip: str = "192.168.29.110",
@@ -200,23 +192,19 @@ class ESPWebSocketClient:
 
 def create_esp_tools(esp: ESPWebSocketClient):
     def set_relay(channel: int, turn_on: bool) -> str:
-        """Set relay channel 1..4 to ON (True) or OFF (False)."""
         if channel not in (1, 2, 3, 4):
             return "Invalid channel. Must be between 1 and 4."
         state_str = "ON" if turn_on else "OFF"
         return esp.send_command(f"POWER{channel} {state_str}")
 
     def set_dimmer(level: int) -> str:
-        """Set dimmer / fan speed level from 0 (off/min) to 9 (max)."""
         clamped = max(0, min(9, int(level)))
         return esp.send_command(f"DIMMER:{clamped}")
 
     def set_all_relays(turn_on: bool) -> str:
-        """Turn all relays ON (True) or OFF (False)."""
         return esp.send_command("ALL_ON" if turn_on else "ALL_OFF")
 
     def get_device_status() -> str:
-        """Query current relay and dimmer status from the ESP controller."""
         esp.send_command("STATUS")
         return json.dumps({
             "relays": esp.relay_states,
@@ -231,18 +219,6 @@ def resolve_api_key(api_key: str | None) -> str:
     return (api_key or "").strip() or os.environ.get("GEMINI_API_KEY") or DEFAULT_GEMINI_API_KEY
 
 
-def list_available_models(api_key: str | None) -> list[str]:
-    client = genai.Client(api_key=resolve_api_key(api_key))
-    names = []
-    for m in client.models.list():
-        name = getattr(m, "name", "") or ""
-        if name.startswith("models/"):
-            name = name.split("/", 1)[1]
-        if name:
-            names.append(name)
-    return names
-
-
 def pcm_to_wav_bytes(pcm_bytes: bytes, sample_rate: int = MIC_SAMPLE_RATE, channels: int = 1) -> bytes:
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
@@ -254,7 +230,6 @@ def pcm_to_wav_bytes(pcm_bytes: bytes, sample_rate: int = MIC_SAMPLE_RATE, chann
 
 
 def speak_short_message(text: str, max_chars: int = 140, log_fn=None):
-    """Speak a brief confirmation on the default Windows audio output device."""
     cleaned = " ".join((text or "").replace("*", "").replace("#", "").split()).strip()
     if not cleaned:
         return
@@ -279,15 +254,13 @@ def run_intent_input(
     contents_payload,
     esp: ESPWebSocketClient,
     api_key: str,
-    model_name: str = DEFAULT_GEMINI_MODEL,
+    model_name: str = GEMINI_MODEL,
     log_fn=None,
-) -> str:
+) -> tuple[str, str]:
     resolved_key = resolve_api_key(api_key)
-    primary_model = (model_name or "").strip() or DEFAULT_GEMINI_MODEL
+    active_model = (model_name or "").strip() or GEMINI_MODEL
     client = genai.Client(api_key=resolved_key)
     tools = create_esp_tools(esp)
-
-    candidates = [primary_model] + [m for m in FALLBACK_GEMINI_MODELS if m != primary_model]
     delays = [0.8, 1.8, 3.5]
     last_err = None
 
@@ -297,30 +270,26 @@ def run_intent_input(
         "Reply in a single short sentence (under 15 words) confirming the result."
     )
 
-    for model_id in candidates:
-        for attempt, delay in enumerate(delays, start=1):
-            try:
-                response = client.models.generate_content(
-                    model=model_id,
-                    contents=contents_payload,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_prompt,
-                        tools=tools,
-                    ),
-                )
-                return (response.text or "Done.").strip()
-            except Exception as e:
-                last_err = e
-                err_str = str(e)
-                is_503 = "503" in err_str or "UNAVAILABLE" in err_str
-                if not is_503:
-                    raise
-                if log_fn:
-                    log_fn(f"[Retry] {model_id} busy (503), attempt {attempt}/{len(delays)}...\n")
-                time.sleep(delay)
-
-        if log_fn and model_id != candidates[-1]:
-            log_fn(f"[Fallback] {model_id} still 503; trying next model...\n")
+    for attempt, delay in enumerate(delays, start=1):
+        try:
+            response = client.models.generate_content(
+                model=active_model,
+                contents=contents_payload,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    tools=tools,
+                ),
+            )
+            return (response.text or "Done.").strip(), active_model
+        except Exception as e:
+            last_err = e
+            err_str = str(e)
+            is_503 = "503" in err_str or "UNAVAILABLE" in err_str
+            if not is_503:
+                raise
+            if log_fn:
+                log_fn(f"[Retry] {active_model} busy (503), attempt {attempt}/{len(delays)}...\n")
+            time.sleep(delay)
 
     raise last_err
 
@@ -329,7 +298,7 @@ class GeminiESPControllerGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Gemini ESP WebSocket Voice & Hardware Controller")
-        self.root.geometry("800x820")
+        self.root.geometry("820x820")
         self.root.minsize(720, 740)
 
         self.is_running_prompt = False
@@ -354,7 +323,6 @@ class GeminiESPControllerGUI:
     def _build_ui(self):
         pad = {"padx": 10, "pady": 5}
 
-        # --- WebSocket Connection Frame ---
         ws_frame = ttk.LabelFrame(self.root, text="ESP WebSocket Connection", padding=8)
         ws_frame.pack(fill="x", **pad)
 
@@ -384,7 +352,6 @@ class GeminiESPControllerGUI:
         self.status_lbl = ttk.Label(ws_frame, text="Disconnected", foreground="#b00020")
         self.status_lbl.grid(row=0, column=9, sticky="w")
 
-        # --- Relays Frame (Relays 1-4) ---
         relay_frame = ttk.LabelFrame(self.root, text="Relay Controls", padding=8)
         relay_frame.pack(fill="x", **pad)
 
@@ -403,7 +370,6 @@ class GeminiESPControllerGUI:
             btn.pack(side="left", expand=True, padx=5, pady=2)
             self.relay_buttons.append(btn)
 
-        # --- Dimmer Frame (0-9 + MIN / Step - / Slider / Step + / MAX) ---
         dimmer_frame = ttk.LabelFrame(self.root, text="Dimmer Control (0-9)", padding=8)
         dimmer_frame.pack(fill="x", **pad)
 
@@ -435,7 +401,6 @@ class GeminiESPControllerGUI:
             d_sub, text="MAX (9)", command=lambda: self.set_dimmer_direct(9)
         ).pack(side="left", padx=4)
 
-        # --- Global & Utils Frame ---
         global_frame = ttk.LabelFrame(self.root, text="Global Commands & Status", padding=8)
         global_frame.pack(fill="x", **pad)
 
@@ -452,12 +417,11 @@ class GeminiESPControllerGUI:
             g_sub, text="Get Status", command=self.send_status_cmd
         ).pack(side="left", expand=True, padx=5)
 
-        # --- Gemini API Key & Model Frame ---
         key_frame = ttk.LabelFrame(self.root, text="Gemini API Configuration", padding=8)
         key_frame.pack(fill="x", **pad)
 
         ttk.Label(key_frame, text="API Key:").pack(side="left")
-        self.api_key_entry = ttk.Entry(key_frame, show="*")
+        self.api_key_entry = ttk.Entry(key_frame, width=24, show="*")
         self.api_key_entry.insert(0, resolve_api_key(None))
         self.api_key_entry.pack(side="left", fill="x", expand=True, padx=(6, 8))
 
@@ -470,13 +434,10 @@ class GeminiESPControllerGUI:
         ).pack(side="left", padx=(0, 10))
 
         ttk.Label(key_frame, text="Model:").pack(side="left")
-        self.model_entry = ttk.Entry(key_frame, width=20)
-        self.model_entry.insert(0, DEFAULT_GEMINI_MODEL)
-        self.model_entry.pack(side="left", padx=(6, 6))
+        self.model_entry = ttk.Entry(key_frame, width=24)
+        self.model_entry.insert(0, GEMINI_MODEL)
+        self.model_entry.pack(side="left", padx=(6, 0))
 
-        ttk.Button(key_frame, text="List Models", command=self.check_models).pack(side="left")
-
-        # --- Natural Language & Default Mic Frame ---
         prompt_frame = ttk.LabelFrame(self.root, text="Intent Command (Text or Default Mic)", padding=8)
         prompt_frame.pack(fill="x", **pad)
 
@@ -491,7 +452,6 @@ class GeminiESPControllerGUI:
         self.mic_btn = ttk.Button(prompt_frame, text="?? Speak (Default Mic)", command=self.toggle_voice_recording)
         self.mic_btn.pack(side="left")
 
-        # --- Quick Test Chips & Speaker Toggle ---
         quick_frame = ttk.Frame(self.root)
         quick_frame.pack(fill="x", padx=10, pady=(0, 4))
 
@@ -515,7 +475,6 @@ class GeminiESPControllerGUI:
             variable=self.speak_reply_var,
         ).pack(side="right")
 
-        # --- Console / Assistant Output Log ---
         log_frame = ttk.LabelFrame(self.root, text="Assistant Response & WebSocket Log", padding=8)
         log_frame.pack(fill="both", expand=True, **pad)
 
@@ -526,7 +485,6 @@ class GeminiESPControllerGUI:
 
         ttk.Button(log_frame, text="Clear Log", command=self.clear_log).pack(anchor="e", pady=(6, 0))
 
-    # --- Manual Hardware Controls ---
     def toggle_relay(self, relay_num: int):
         idx = relay_num - 1
         target_state = not self.relay_states[idx]
@@ -585,7 +543,6 @@ class GeminiESPControllerGUI:
         except Exception:
             pass
 
-    # --- Voice & Gemini Intent Controls ---
     def _use_sample_prompt(self, text: str):
         self.prompt_entry.delete(0, tk.END)
         self.prompt_entry.insert(0, text)
@@ -656,21 +613,6 @@ class GeminiESPControllerGUI:
         if not self.is_running_prompt:
             self.send_btn.config(state="normal")
 
-    def check_models(self):
-        api_key = self.api_key_entry.get().strip()
-        self.safe_log(">> Fetching available Gemini models...\n")
-
-        def worker():
-            try:
-                models = list_available_models(api_key)
-                flash_models = [m for m in models if "flash" in m.lower()]
-                preview = ", ".join(flash_models[:12]) if flash_models else ", ".join(models[:12])
-                self.safe_log(f"[Models] {preview}\n")
-            except Exception as e:
-                self.safe_log(f"[Error listing models] {e}\n")
-
-        threading.Thread(target=worker, daemon=True).start()
-
     def connect_ws(self):
         ip = self.ip_entry.get().strip()
         port_str = self.port_entry.get().strip()
@@ -713,8 +655,14 @@ class GeminiESPControllerGUI:
 
         def worker():
             try:
-                reply = run_intent_input(payload, self.esp_client, api_key, model_name, log_fn=self.safe_log)
-                self.safe_log(f"[Gemini] {reply}\n")
+                reply, used_model = run_intent_input(
+                    payload,
+                    self.esp_client,
+                    api_key,
+                    model_name=model_name,
+                    log_fn=self.safe_log,
+                )
+                self.safe_log(f"[Gemini ({used_model})] {reply}\n")
                 if should_speak:
                     speak_short_message(reply, max_chars=140, log_fn=self.safe_log)
             except Exception as e:
