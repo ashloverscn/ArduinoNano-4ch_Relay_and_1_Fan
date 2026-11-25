@@ -4,7 +4,6 @@ import json
 import math
 import os
 import queue
-import re
 import struct
 import threading
 import time
@@ -208,15 +207,12 @@ class ESPWebSocketClient:
         for i in range(1, 5):
             key = f"POWER{i}"
             if key in data:
-                new_val = (data[key] == "ON")
-                if self.relay_states[i - 1] != new_val:
-                    self.relay_states[i - 1] = new_val
+                self.relay_states[i - 1] = (data[key] == "ON")
                 state_updated = True
 
         if "Dimmer" in data:
             try:
-                new_lvl = max(0, min(9, int(data["Dimmer"])))
-                self.dimmer_level = new_lvl
+                self.dimmer_level = max(0, min(9, int(data["Dimmer"])))
                 state_updated = True
             except (ValueError, TypeError):
                 pass
@@ -260,59 +256,60 @@ class ESPWebSocketClient:
                 return err
 
 
-OLLAMA_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "set_relay",
-            "description": "Turn relay channel 1..4 ON or OFF.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "channel": {"type": "integer", "enum": [1, 2, 3, 4]},
-                    "turn_on": {"type": "boolean"},
+AUTONOMOUS_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "smart_room_plan",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "actions": {
+                    "type": "array",
+                    "description": "Ordered list of hardware actions to execute on the ESP controller.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "enum": [
+                                    "set_relay",
+                                    "set_dimmer",
+                                    "set_all_relays",
+                                    "get_status",
+                                ],
+                            },
+                            "channel": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 4,
+                                "description": "Relay channel 1..4 (used when type is set_relay).",
+                            },
+                            "turn_on": {
+                                "type": "boolean",
+                                "description": "True for ON, False for OFF (used for set_relay and set_all_relays).",
+                            },
+                            "level": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9,
+                                "description": "Fan speed 0..9 (used ONLY when type is set_dimmer).",
+                            },
+                        },
+                        "required": ["type"],
+                        "additionalProperties": False,
+                    },
                 },
-                "required": ["channel", "turn_on"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_dimmer",
-            "description": "Set dimmer or fan speed level from 0 (min/off) to 9 (max).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "level": {"type": "integer", "minimum": 0, "maximum": 9},
+                "reply": {
+                    "type": "string",
+                    "description": "Natural, concise confirmation under 15 words.",
                 },
-                "required": ["level"],
             },
+            "required": ["actions", "reply"],
+            "additionalProperties": False,
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_all_relays",
-            "description": "Turn all relays ON or OFF.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "turn_on": {"type": "boolean"},
-                },
-                "required": ["turn_on"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_device_status",
-            "description": "Query current relay and dimmer status from the ESP.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-]
+}
 
 
 def resolve_ollama_url(url: str | None) -> str:
@@ -329,150 +326,47 @@ def _make_ollama_client(url: str | None) -> OpenAI:
     return OpenAI(
         base_url=resolve_ollama_url(url),
         api_key=os.environ.get("OLLAMA_API_KEY", "ollama").strip() or "ollama",
-        timeout=20.0,
+        timeout=25.0,
     )
 
 
-def execute_tool_call(name: str, args: dict, esp: ESPWebSocketClient) -> str:
-    if name == "set_relay":
-        ch = int(args.get("channel", 0))
-        if ch not in (1, 2, 3, 4):
-            return "Invalid relay channel."
-        state = "ON" if bool(args.get("turn_on")) else "OFF"
+def execute_action(action: dict, esp: ESPWebSocketClient) -> str:
+    act_type = str(action.get("type", "")).strip()
+    if act_type == "set_relay":
+        ch = int(action.get("channel", 1))
+        ch = max(1, min(4, ch))
+        state = "ON" if bool(action.get("turn_on", True)) else "OFF"
         return esp.send_command(f"POWER{ch} {state}")
-    if name == "set_dimmer":
-        lvl = max(0, min(9, int(args.get("level", 0))))
+    if act_type == "set_dimmer":
+        lvl = max(0, min(9, int(action.get("level", 0))))
         return esp.send_command(f"DIMMER:{lvl}")
-    if name == "set_all_relays":
-        cmd = "ALL_ON" if bool(args.get("turn_on")) else "ALL_OFF"
+    if act_type == "set_all_relays":
+        cmd = "ALL_ON" if bool(action.get("turn_on", False)) else "ALL_OFF"
         return esp.send_command(cmd)
-    if name == "get_device_status":
-        esp.send_command("STATUS")
-        return json.dumps({"relays": esp.relay_states, "dimmer": esp.dimmer_level})
-    return f"Unknown tool: {name}"
+    if act_type == "get_status":
+        return esp.send_command("STATUS")
+    return f"Ignored unknown action: {act_type}"
 
 
-def _build_clean_assistant_message(msg) -> dict:
-    clean_calls = []
-    for tc in getattr(msg, "tool_calls", None) or []:
-        clean_calls.append({
-            "id": tc.id,
-            "type": getattr(tc, "type", "function") or "function",
-            "function": {
-                "name": tc.function.name,
-                "arguments": tc.function.arguments or "{}",
-            },
-        })
-    entry = {
-        "role": "assistant",
-        "content": msg.content if msg.content is not None else "",
-    }
-    if clean_calls:
-        entry["tool_calls"] = clean_calls
-    return entry
-
-
-def _iter_json_objects(text: str):
-    decoder = json.JSONDecoder()
-    idx = 0
-    length = len(text)
-    while idx < length:
-        brace_pos = text.find("{", idx)
-        if brace_pos == -1:
-            break
-        try:
-            obj, end_pos = decoder.raw_decode(text, brace_pos)
-            if isinstance(obj, dict):
-                yield obj
-            idx = end_pos
-        except json.JSONDecodeError:
-            idx = brace_pos + 1
-
-
-def _extract_json_commands(text: str, esp: ESPWebSocketClient) -> str | None:
-    if not text:
+def _parse_structured_plan(raw_text: str) -> dict | None:
+    if not raw_text:
         return None
+    try:
+        data = json.loads(raw_text)
+        if isinstance(data, dict) and isinstance(data.get("actions"), list):
+            return data
+    except json.JSONDecodeError:
+        pass
 
-    executed = False
-    custom_reply = ""
-    valid_tools = {"set_relay", "set_dimmer", "set_all_relays", "get_device_status"}
-
-    for obj in _iter_json_objects(text):
-        fn_name = obj.get("name")
-        fn_args = obj.get("arguments")
-        if isinstance(fn_name, str) and fn_name in valid_tools:
-            if isinstance(fn_args, str):
-                try:
-                    fn_args = json.loads(fn_args)
-                except json.JSONDecodeError:
-                    fn_args = {}
-            if not isinstance(fn_args, dict):
-                fn_args = {}
-            execute_tool_call(fn_name, fn_args, esp)
-            executed = True
-            continue
-
-        cmds = obj.get("commands")
-        if isinstance(cmds, list):
-            for item in cmds:
-                if not isinstance(item, str):
-                    continue
-                cmd = re.sub(r"\s+", " ", item.strip().upper())
-                if re.fullmatch(r"(?:POWER[1-4]\s+(?:ON|OFF)|DIMMER:[0-9]|ALL_ON|ALL_OFF|STATUS)", cmd):
-                    esp.send_command(cmd)
-                    executed = True
-            if isinstance(obj.get("reply"), str) and obj["reply"].strip():
-                custom_reply = obj["reply"].strip()
-
-    if executed:
-        return custom_reply or f"Done. Relays: {esp.relay_states}, dimmer: {esp.dimmer_level}."
-    return None
-
-
-def local_rule_fallback(text: str, esp: ESPWebSocketClient) -> str | None:
-    """Zero-LLM deterministic fallback supporting single and compound commands."""
-    t = text.lower().strip()
-    actions = []
-
-    if re.search(r"\ball\s+on\b|\bturn\s+on\s+all\b", t):
-        esp.send_command("ALL_ON")
-        actions.append("all relays on")
-    elif re.search(r"\ball\s+off\b|\bturn\s+off\s+all\b", t):
-        esp.send_command("ALL_OFF")
-        actions.append("all relays off")
-
-    relay_cmds: dict[int, str] = {}
-    for m in re.finditer(r"\brelay\s*([1-4])\s*(on|off)\b", t):
-        relay_cmds[int(m.group(1))] = m.group(2).upper()
-    for m in re.finditer(r"\bturn\s+(on|off)\s+relay\s*([1-4])\b", t):
-        relay_cmds[int(m.group(2))] = m.group(1).upper()
-
-    for ch in sorted(relay_cmds):
-        state = relay_cmds[ch]
-        esp.send_command(f"POWER{ch} {state}")
-        actions.append(f"relay {ch} {state.lower()}")
-
-    dm = re.search(
-        r"\b(?:dimmer|fan|speed)(?:\s+(?:speed|level))?(?:\s*(?:to|at|level|:))?\s*([0-9])\b",
-        t,
-    )
-    if dm:
-        lvl = int(dm.group(1))
-        esp.send_command(f"DIMMER:{lvl}")
-        actions.append(f"dimmer {lvl}")
-    elif re.search(r"\bturn\s+on\s+(?:the\s+)?fan\b", t) and esp.dimmer_level == 0:
-        esp.send_command("DIMMER:5")
-        actions.append("dimmer 5")
-    elif re.search(r"\bturn\s+off\s+(?:the\s+)?fan\b", t):
-        esp.send_command("DIMMER:0")
-        actions.append("dimmer 0")
-
-    if not actions and ("status" in t or "state" in t):
-        esp.send_command("STATUS")
-        return f"Relays {esp.relay_states}, dimmer {esp.dimmer_level}."
-
-    if actions:
-        return "Done: " + ", ".join(actions) + "."
+    decoder = json.JSONDecoder()
+    idx = raw_text.find("{")
+    if idx != -1:
+        try:
+            data, _ = decoder.raw_decode(raw_text, idx)
+            if isinstance(data, dict) and isinstance(data.get("actions"), list):
+                return data
+        except json.JSONDecodeError:
+            pass
     return None
 
 
@@ -554,14 +448,28 @@ def run_ollama_intent(
     primary = (model_name or "").strip() or DEFAULT_OLLAMA_MODEL
     models = [primary] + [m for m in FALLBACK_OLLAMA_MODELS if m != primary]
 
-    base_messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a smart room controller. Call tools for relays (1-4), dimmer/fan (0-9), "
-                "all-on/off, or status. Reply in one short sentence under 15 words."
-            ),
-        },
+    live_state = {
+        "relay_1": "ON" if esp.relay_states[0] else "OFF",
+        "relay_2": "ON" if esp.relay_states[1] else "OFF",
+        "relay_3": "ON" if esp.relay_states[2] else "OFF",
+        "relay_4": "ON" if esp.relay_states[3] else "OFF",
+        "dimmer_fan_speed": esp.dimmer_level,
+    }
+
+    system_prompt = (
+        "You are an autonomous smart room controller AI. Decide on your own which hardware "
+        "actions to execute from the user's natural intent and current device state.\n"
+        "Hardware rules:\n"
+        "- Relays 1 to 4 are ON/OFF AC switches for lights and appliances (Relay 1 is primary room light).\n"
+        "- Dimmer (0 to 9) is strictly the AC fan speed regulator (0 = fan off, 1 = slowest, 9 = fastest).\n"
+        "- Never use set_dimmer for lights; always use set_relay for lights or appliances.\n"
+        "- You can emit multiple actions in order (e.g., turn on a relay and set fan speed, or adjust speed relative to current level).\n"
+        f"Current live state: {json.dumps(live_state)}\n"
+        "Return JSON matching the schema with an 'actions' list and a short 'reply' under 15 words."
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": prompt_text},
     ]
 
@@ -570,70 +478,33 @@ def run_ollama_intent(
         try:
             resp = client.chat.completions.create(
                 model=m_id,
-                messages=list(base_messages),
-                tools=OLLAMA_TOOLS,
-                tool_choice="auto",
+                messages=messages,
+                response_format=AUTONOMOUS_RESPONSE_FORMAT,
                 temperature=0.0,
             )
-            msg = resp.choices[0].message
-            tool_calls = getattr(msg, "tool_calls", None) or []
+            raw_content = (resp.choices[0].message.content or "").strip()
+            plan = _parse_structured_plan(raw_content)
+            if plan is None:
+                raise ValueError(f"Unparseable model output: {raw_content}")
 
-            if tool_calls:
-                tool_msgs = []
-                for tc in tool_calls:
-                    fn_name = tc.function.name
-                    try:
-                        fn_args = json.loads(tc.function.arguments or "{}")
-                    except json.JSONDecodeError:
-                        fn_args = {}
-                    result_str = execute_tool_call(fn_name, fn_args, esp)
-                    tool_msgs.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": result_str,
-                    })
+            for act in plan.get("actions", []):
+                if isinstance(act, dict):
+                    execute_action(act, esp)
 
-                followup_messages = list(base_messages) + [_build_clean_assistant_message(msg)] + tool_msgs
-                try:
-                    followup = client.chat.completions.create(
-                        model=m_id,
-                        messages=followup_messages,
-                        temperature=0.0,
-                    )
-                    reply = (followup.choices[0].message.content or "").strip()
-                    return reply or f"Done. Relays: {esp.relay_states}, dimmer: {esp.dimmer_level}."
-                except Exception as follow_err:
-                    if log_fn:
-                        log_fn(f"[Ollama Follow-up Note] {follow_err}\n")
-                    return f"Done. Relays: {esp.relay_states}, dimmer: {esp.dimmer_level}."
-
-            content = (msg.content or "").strip()
-            json_reply = _extract_json_commands(content, esp)
-            if json_reply:
-                return json_reply
-
-            rule_reply = local_rule_fallback(prompt_text, esp)
-            if rule_reply:
-                return rule_reply
-
-            return content or "Done."
+            reply = str(plan.get("reply") or "").strip()
+            return reply or f"Done. Relays: {esp.relay_states}, dimmer: {esp.dimmer_level}."
         except Exception as e:
             last_err = e
             if log_fn:
                 log_fn(f"[Ollama {m_id} Error] {e}\n")
 
-    local_res = local_rule_fallback(prompt_text, esp)
-    if local_res:
-        return f"{local_res} (via local fallback)"
-    if last_err is not None:
-        raise last_err
-    return "No action taken."
+    raise last_err if last_err is not None else RuntimeError("All Ollama models failed.")
 
 
 class OllamaESPControllerGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Ollama ESP WebSocket Voice & Hardware Controller")
+        self.root.title("Ollama Autonomous ESP WebSocket Voice & Hardware Controller")
         self.root.geometry("820x830")
         self.root.minsize(740, 750)
 
@@ -766,7 +637,7 @@ class OllamaESPControllerGUI:
         prompt_frame.pack(fill="x", **pad)
 
         self.prompt_entry = ttk.Entry(prompt_frame, font=("Arial", 10))
-        self.prompt_entry.insert(0, "Turn on relay 4 and set the dimmer to level 6.")
+        self.prompt_entry.insert(0, "Turn on bedroom light 2 and set the fan speed to 6.")
         self.prompt_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self.prompt_entry.bind("<Return>", lambda _e: self.send_text_intent())
 
