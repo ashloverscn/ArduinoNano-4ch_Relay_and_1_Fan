@@ -4,11 +4,13 @@ import json
 import math
 import os
 import queue
+import re
 import struct
 import threading
 import time
 import tkinter as tk
 import wave
+from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
 
 import pyttsx3
@@ -17,24 +19,59 @@ import websockets
 from openai import OpenAI
 
 DEFAULT_OLLAMA_URL = "http://sasoftwares-lab:11434/v1"
-DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:1.5b"
+DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:3b"
 AVAILABLE_OLLAMA_MODELS = [
+    "qwen2.5-coder:3b",
     "qwen2.5-coder:1.5b",
     "qwen2.5-coder:7b",
+    "qwen2.5-coder:14b",
+    "qwen2.5-coder:32b",
     "qwen2.5:3b",
     "llama3.2:3b",
+    "llama3.2:1b",
+    "qwen3:1.7b",
+    "qwen3:4b",
+    "qwen3.5:2b",
+    "qwen3.5:4b",
+    "gemma3:4b",
+    "gemma4:e4b",
+    "lfm3:1.7b",
+    "deepseek-r1:1.5b",
+    "deepseek-r1:7b",
+    "mistral:7b",
 ]
 FALLBACK_OLLAMA_MODELS = [
+    "qwen2.5-coder:3b",
     "qwen2.5-coder:1.5b",
     "qwen2.5:3b",
     "llama3.2:3b",
 ]
+
+SETTINGS_FILE = Path(__file__).with_name("ollama_esp_settings.json")
 
 MIC_SAMPLE_RATE = 16000
 MAX_RECORD_SECONDS = 6
 
 _whisper_model = None
 _whisper_lock = threading.Lock()
+
+
+def load_saved_settings() -> dict:
+    try:
+        if SETTINGS_FILE.exists():
+            data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_saved_settings(data: dict):
+    try:
+        SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
 
 class SpeechWorker:
@@ -90,6 +127,7 @@ class ESPWebSocketClient:
         on_status_change=None,
         on_state_change=None,
         hide_console_echo: bool = True,
+        pending_grace_sec: float = 0.65,
     ):
         self.esp_ip = esp_ip
         self.ws_port = ws_port
@@ -99,6 +137,7 @@ class ESPWebSocketClient:
         self.on_status_change = on_status_change
         self.on_state_change = on_state_change
         self.hide_console_echo = hide_console_echo
+        self.pending_grace_sec = pending_grace_sec
 
         self._ws = None
         self._loop = None
@@ -106,10 +145,17 @@ class ESPWebSocketClient:
         self._stop_event = threading.Event()
         self._connected_event = threading.Event()
         self._send_lock = threading.Lock()
+        self._state_lock = threading.Lock()
 
         self.relay_states = [False, False, False, False]
         self.dimmer_level = 0
         self.last_feedback = {}
+        self._last_logged_raw = ""
+
+        # Maps relay index 0..3 -> (desired_bool, deadline_monotonic)
+        self._pending_relays: dict[int, tuple[bool, float]] = {}
+        # (desired_level, deadline_monotonic) or None
+        self._pending_dimmer: tuple[int, float] | None = None
 
     def _log(self, msg: str):
         if self.on_log:
@@ -123,7 +169,10 @@ class ESPWebSocketClient:
 
     def _notify_state(self):
         if self.on_state_change:
-            self.on_state_change(list(self.relay_states), int(self.dimmer_level))
+            with self._state_lock:
+                r_copy = list(self.relay_states)
+                d_copy = int(self.dimmer_level)
+            self.on_state_change(r_copy, d_copy)
 
     def start(self, timeout: float = 5.0) -> bool:
         self.stop()
@@ -190,68 +239,158 @@ class ESPWebSocketClient:
                     self._log(f">> WS error/disconnected ({e}), retrying in 2s...\n")
                     await asyncio.sleep(2.0)
 
+    @staticmethod
+    def _parse_bool_state(val) -> bool | None:
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, (int, float)):
+            return bool(val)
+        if isinstance(val, str):
+            norm = val.strip().upper()
+            if norm in ("ON", "TRUE", "1"):
+                return True
+            if norm in ("OFF", "FALSE", "0"):
+                return False
+        return None
+
+    def _register_pending_command(self, cmd: str):
+        norm = re.sub(r"\s+", " ", (cmd or "").strip().upper())
+        deadline = time.monotonic() + self.pending_grace_sec
+
+        with self._state_lock:
+            m_pwr = re.fullmatch(r"POWER([1-4])\s+(ON|OFF)", norm)
+            if m_pwr:
+                idx = int(m_pwr.group(1)) - 1
+                self._pending_relays[idx] = (m_pwr.group(2) == "ON", deadline)
+                return
+
+            if norm == "ALL_ON":
+                for idx in range(4):
+                    self._pending_relays[idx] = (True, deadline)
+                return
+
+            if norm == "ALL_OFF":
+                for idx in range(4):
+                    self._pending_relays[idx] = (False, deadline)
+                return
+
+            m_dim = re.fullmatch(r"DIMMER:([0-9])", norm)
+            if m_dim:
+                lvl = max(0, min(9, int(m_dim.group(1))))
+                self._pending_dimmer = (lvl, deadline)
+                return
+
+            if norm == "STATUS":
+                self._pending_relays.clear()
+                self._pending_dimmer = None
+
+    def _apply_relay_reading(self, idx: int, incoming_on: bool, now: float) -> bool:
+        pending = self._pending_relays.get(idx)
+        if pending is not None:
+            desired, deadline = pending
+            if now <= deadline and incoming_on != desired:
+                return False
+            del self._pending_relays[idx]
+
+        if self.relay_states[idx] != incoming_on:
+            self.relay_states[idx] = incoming_on
+            return True
+        return False
+
+    def _apply_dimmer_reading(self, incoming_lvl: int, now: float) -> bool:
+        clamped = max(0, min(9, int(incoming_lvl)))
+        if self._pending_dimmer is not None:
+            desired, deadline = self._pending_dimmer
+            if now <= deadline and clamped != desired:
+                return False
+            self._pending_dimmer = None
+
+        if self.dimmer_level != clamped:
+            self.dimmer_level = clamped
+            return True
+        return False
+
     def _parse_feedback(self, raw_msg: str):
+        trimmed = (raw_msg or "").strip()
         try:
-            data = json.loads(raw_msg)
+            data = json.loads(trimmed)
         except json.JSONDecodeError:
-            self._log(f"<< {raw_msg}\n")
+            self._log(f"<< {trimmed}\n")
+            return
+
+        if not isinstance(data, dict):
             return
 
         if self.hide_console_echo and data.get("type") == "console_log":
             return
 
-        self._log(f"<< {raw_msg}\n")
-        self.last_feedback = data
+        if trimmed != self._last_logged_raw:
+            self._last_logged_raw = trimmed
+            self._log(f"<< {trimmed}\n")
+
+        now = time.monotonic()
         state_updated = False
 
-        for i in range(1, 5):
-            key = f"POWER{i}"
-            if key in data:
-                self.relay_states[i - 1] = (data[key] == "ON")
-                state_updated = True
+        with self._state_lock:
+            self.last_feedback = data
 
-        if "Dimmer" in data:
-            try:
-                self.dimmer_level = max(0, min(9, int(data["Dimmer"])))
-                state_updated = True
-            except (ValueError, TypeError):
-                pass
+            for i in range(1, 5):
+                key = f"POWER{i}"
+                if key in data:
+                    parsed = self._parse_bool_state(data[key])
+                    if parsed is not None:
+                        if self._apply_relay_reading(i - 1, parsed, now):
+                            state_updated = True
 
-        if data.get("type") == "state_update":
-            if "relays" in data and isinstance(data["relays"], list):
-                for i, state in enumerate(data["relays"][:4]):
-                    self.relay_states[i] = bool(state)
-                    state_updated = True
-            if "dimmer" in data:
+            if "Dimmer" in data:
                 try:
-                    self.dimmer_level = max(0, min(9, int(data["dimmer"])))
-                    state_updated = True
+                    if self._apply_dimmer_reading(int(data["Dimmer"]), now):
+                        state_updated = True
                 except (ValueError, TypeError):
                     pass
+
+            if data.get("type") == "state_update":
+                if isinstance(data.get("relays"), list):
+                    for i, state in enumerate(data["relays"][:4]):
+                        parsed = self._parse_bool_state(state)
+                        if parsed is not None:
+                            if self._apply_relay_reading(i, parsed, now):
+                                state_updated = True
+                if "dimmer" in data:
+                    try:
+                        if self._apply_dimmer_reading(int(data["dimmer"]), now):
+                            state_updated = True
+                    except (ValueError, TypeError):
+                        pass
 
         if state_updated:
             self._notify_state()
 
     def send_command(self, cmd: str, wait_feedback: float = 0.25) -> str:
+        norm_cmd = re.sub(r"\s+", " ", (cmd or "").strip().upper())
         if not self._connected_event.is_set() or not self._ws or not self._loop:
-            msg = f"Failed to send '{cmd}': ESP WebSocket is not connected."
+            msg = f"Failed to send '{norm_cmd}': ESP WebSocket is not connected."
             self._log(f">> {msg}\n")
             return msg
 
-        payload = json.dumps({"command": cmd})
+        self._register_pending_command(norm_cmd)
+        payload = json.dumps({"command": norm_cmd})
         with self._send_lock:
             try:
                 fut = asyncio.run_coroutine_threadsafe(self._ws.send(payload), self._loop)
                 fut.result(timeout=3.0)
-                self._log(f">> {cmd}\n")
+                self._log(f">> {norm_cmd}\n")
                 if wait_feedback > 0:
                     time.sleep(wait_feedback)
+                with self._state_lock:
+                    r_snap = list(self.relay_states)
+                    d_snap = int(self.dimmer_level)
                 return (
-                    f"Sent '{cmd}'. Current state -> "
-                    f"relays={self.relay_states}, dimmer={self.dimmer_level}"
+                    f"Sent '{norm_cmd}'. Current state -> "
+                    f"relays={r_snap}, dimmer={d_snap}"
                 )
             except Exception as e:
-                err = f"Error sending '{cmd}': {e}"
+                err = f"Error sending '{norm_cmd}': {e}"
                 self._log(f">> {err}\n")
                 return err
 
@@ -508,6 +647,8 @@ class OllamaESPControllerGUI:
         self.root.geometry("820x830")
         self.root.minsize(740, 750)
 
+        self.saved_settings = load_saved_settings()
+
         self.is_running_prompt = False
         self.is_recording = False
         self._record_stop_event = threading.Event()
@@ -525,8 +666,31 @@ class OllamaESPControllerGUI:
         )
 
         self._build_ui()
+        self._restore_saved_state()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.connect_ws()
+
+    def _restore_saved_state(self):
+        saved_url = str(self.saved_settings.get("ollama_url") or "").strip()
+        if saved_url:
+            self.ollama_url_entry.delete(0, tk.END)
+            self.ollama_url_entry.insert(0, saved_url)
+
+        saved_model = str(self.saved_settings.get("selected_model") or "").strip()
+        if saved_model:
+            current_vals = list(self.model_combo["values"])
+            if saved_model not in current_vals:
+                self.model_combo["values"] = [saved_model] + current_vals
+            self.model_combo.set(saved_model)
+        else:
+            self.model_combo.set(DEFAULT_OLLAMA_MODEL)
+
+    def _persist_model_selection(self, *_args):
+        model_val = self.model_combo.get().strip() or DEFAULT_OLLAMA_MODEL
+        url_val = self.ollama_url_entry.get().strip() or resolve_ollama_url(None)
+        self.saved_settings["selected_model"] = model_val
+        self.saved_settings["ollama_url"] = url_val
+        save_saved_settings(self.saved_settings)
 
     def _build_ui(self):
         pad = {"padx": 10, "pady": 5}
@@ -619,6 +783,8 @@ class OllamaESPControllerGUI:
         self.ollama_url_entry = ttk.Entry(ollama_frame, width=30)
         self.ollama_url_entry.insert(0, resolve_ollama_url(None))
         self.ollama_url_entry.pack(side="left", fill="x", expand=True, padx=(6, 10))
+        self.ollama_url_entry.bind("<FocusOut>", self._persist_model_selection)
+        self.ollama_url_entry.bind("<Return>", self._persist_model_selection)
 
         ttk.Label(ollama_frame, text="Model:").pack(side="left")
         self.model_combo = ttk.Combobox(
@@ -629,6 +795,9 @@ class OllamaESPControllerGUI:
         )
         self.model_combo.set(DEFAULT_OLLAMA_MODEL)
         self.model_combo.pack(side="left", padx=(6, 6))
+        self.model_combo.bind("<<ComboboxSelected>>", self._persist_model_selection)
+        self.model_combo.bind("<FocusOut>", self._persist_model_selection)
+        self.model_combo.bind("<Return>", self._persist_model_selection)
 
         ttk.Button(ollama_frame, text="List Models", command=self.check_models).pack(side="left")
 
@@ -775,6 +944,7 @@ class OllamaESPControllerGUI:
                 self.safe_log("[Mic] No audio captured or too quiet.\n")
                 return
 
+            self._persist_model_selection()
             ollama_url = self.ollama_url_entry.get().strip()
             model_name = self.model_combo.get().strip()
 
@@ -799,6 +969,7 @@ class OllamaESPControllerGUI:
             self.send_btn.config(state="normal")
 
     def check_models(self):
+        self._persist_model_selection()
         ollama_url = self.ollama_url_entry.get().strip()
         self.safe_log(f">> Fetching available Ollama models from {resolve_ollama_url(ollama_url)}...\n")
 
@@ -819,6 +990,7 @@ class OllamaESPControllerGUI:
                             self.model_combo.set(DEFAULT_OLLAMA_MODEL)
                         else:
                             self.model_combo.set(merged[0])
+                        self._persist_model_selection()
 
                     self.root.after(0, _update_combo)
                 preview = ", ".join(models[:15])
@@ -854,6 +1026,7 @@ class OllamaESPControllerGUI:
         prompt = self.prompt_entry.get().strip()
         if not prompt or self.is_running_prompt or self.is_recording:
             return
+        self._persist_model_selection()
         ollama_url = self.ollama_url_entry.get().strip()
         model_name = self.model_combo.get().strip()
         self._run_worker(
@@ -926,6 +1099,7 @@ class OllamaESPControllerGUI:
         self.log_box.config(state="disabled")
 
     def on_closing(self):
+        self._persist_model_selection()
         self._record_stop_event.set()
         self.speech_worker.stop()
         self.esp_client.stop()
