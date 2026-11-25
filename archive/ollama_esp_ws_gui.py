@@ -426,7 +426,7 @@ AUTONOMOUS_RESPONSE_FORMAT = {
                             },
                             "turn_on": {
                                 "type": "boolean",
-                                "description": "True for ON, False for OFF (used for set_relay and set_all_relays).",
+                                "description": "True to turn ON, False to turn OFF (used for set_relay and set_all_relays).",
                             },
                             "level": {
                                 "type": "integer",
@@ -441,7 +441,7 @@ AUTONOMOUS_RESPONSE_FORMAT = {
                 },
                 "reply": {
                     "type": "string",
-                    "description": "Natural, concise confirmation under 15 words.",
+                    "description": "Natural, concise confirmation under 15 words matching the actual actions.",
                 },
             },
             "required": ["actions", "reply"],
@@ -469,18 +469,34 @@ def _make_ollama_client(url: str | None) -> OpenAI:
     )
 
 
+def _coerce_turn_on(val, default: bool = False) -> bool:
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return bool(val)
+    if isinstance(val, str):
+        norm = val.strip().lower()
+        if norm in ("true", "on", "1", "yes"):
+            return True
+        if norm in ("false", "off", "0", "no"):
+            return False
+    return default
+
+
 def execute_action(action: dict, esp: ESPWebSocketClient) -> str:
     act_type = str(action.get("type", "")).strip()
     if act_type == "set_relay":
         ch = int(action.get("channel", 1))
         ch = max(1, min(4, ch))
-        state = "ON" if bool(action.get("turn_on", True)) else "OFF"
+        turn_on = _coerce_turn_on(action.get("turn_on"), default=False)
+        state = "ON" if turn_on else "OFF"
         return esp.send_command(f"POWER{ch} {state}")
     if act_type == "set_dimmer":
         lvl = max(0, min(9, int(action.get("level", 0))))
         return esp.send_command(f"DIMMER:{lvl}")
     if act_type == "set_all_relays":
-        cmd = "ALL_ON" if bool(action.get("turn_on", False)) else "ALL_OFF"
+        turn_on = _coerce_turn_on(action.get("turn_on"), default=False)
+        cmd = "ALL_ON" if turn_on else "ALL_OFF"
         return esp.send_command(cmd)
     if act_type == "get_status":
         return esp.send_command("STATUS")
@@ -490,22 +506,30 @@ def execute_action(action: dict, esp: ESPWebSocketClient) -> str:
 def _parse_structured_plan(raw_text: str) -> dict | None:
     if not raw_text:
         return None
-    try:
-        data = json.loads(raw_text)
-        if isinstance(data, dict) and isinstance(data.get("actions"), list):
-            return data
-    except json.JSONDecodeError:
-        pass
 
-    decoder = json.JSONDecoder()
-    idx = raw_text.find("{")
-    if idx != -1:
+    cleaned = re.sub(r"<think>.*?</think>", "", raw_text, flags=re.DOTALL | re.IGNORECASE).strip()
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE).strip()
+
+    for candidate in (cleaned, raw_text.strip()):
+        if not candidate:
+            continue
         try:
-            data, _ = decoder.raw_decode(raw_text, idx)
+            data = json.loads(candidate)
             if isinstance(data, dict) and isinstance(data.get("actions"), list):
                 return data
         except json.JSONDecodeError:
             pass
+
+        decoder = json.JSONDecoder()
+        idx = candidate.find("{")
+        while idx != -1:
+            try:
+                data, _ = decoder.raw_decode(candidate, idx)
+                if isinstance(data, dict) and isinstance(data.get("actions"), list):
+                    return data
+            except json.JSONDecodeError:
+                pass
+            idx = candidate.find("{", idx + 1)
     return None
 
 
@@ -596,15 +620,21 @@ def run_ollama_intent(
     }
 
     system_prompt = (
-        "You are an autonomous smart room controller AI. Decide on your own which hardware "
-        "actions to execute from the user's natural intent and current device state.\n"
+        "You are an autonomous smart room controller AI. Convert the user's request into "
+        "exact hardware actions based on the rules and examples below.\n"
         "Hardware rules:\n"
-        "- Relays 1 to 4 are ON/OFF AC switches for lights and appliances (Relay 1 is primary room light).\n"
+        "- Relays 1 to 4 are ON/OFF AC switches for lights and appliances (Relay 1 is primary room light; light N or channel N maps to relay N).\n"
+        "- For 'turn off' / 'switch off' / 'off': set turn_on to false.\n"
+        "- For 'turn on' / 'switch on' / 'on': set turn_on to true.\n"
         "- Dimmer (0 to 9) is strictly the AC fan speed regulator (0 = fan off, 1 = slowest, 9 = fastest).\n"
         "- Never use set_dimmer for lights; always use set_relay for lights or appliances.\n"
-        "- You can emit multiple actions in order (e.g., turn on a relay and set fan speed, or adjust speed relative to current level).\n"
+        "Examples:\n"
+        "- User: 'Turn off light 2' -> {\"actions\":[{\"type\":\"set_relay\",\"channel\":2,\"turn_on\":false}],\"reply\":\"Light 2 turned off.\"}\n"
+        "- User: 'Turn on light 3' -> {\"actions\":[{\"type\":\"set_relay\",\"channel\":3,\"turn_on\":true}],\"reply\":\"Light 3 turned on.\"}\n"
+        "- User: 'Turn off bedroom light 2 and set fan speed to 6' -> "
+        "{\"actions\":[{\"type\":\"set_relay\",\"channel\":2,\"turn_on\":false},{\"type\":\"set_dimmer\",\"level\":6}],\"reply\":\"Light 2 off, fan set to 6.\"}\n"
         f"Current live state: {json.dumps(live_state)}\n"
-        "Return JSON matching the schema with an 'actions' list and a short 'reply' under 15 words."
+        "Return ONLY valid JSON matching the schema with an 'actions' list and a short 'reply' under 15 words."
     )
 
     messages = [
