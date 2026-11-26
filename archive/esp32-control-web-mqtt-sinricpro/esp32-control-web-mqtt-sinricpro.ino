@@ -88,6 +88,7 @@ bool apTriggered = false;
 bool factoryResetTriggered = false;
 bool apModeActive = false;
 bool sinricInitialized = false;
+bool mdnsStarted = false;
 int lastFanSpeed = 0;
 
 // Forward declarations
@@ -104,6 +105,7 @@ void enterAPMode();
 void setupOTARoutes(bool requireAuth);
 void setupSinricPro();
 void registerConfigAndActionRoutes(bool inAPMode);
+void startMDNS(bool inAPMode);
 
 // --- HTML Template (Dashboard) ---
 const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
@@ -621,6 +623,8 @@ void loadConfig() {
     stored_web_user = preferences.getString("wuser", DEFAULT_WEB_USER);
     stored_web_pass = preferences.getString("wpass", DEFAULT_WEB_PASS);
 
+    stored_mdns.trim();
+    stored_mdns.toLowerCase();
     if (stored_mdns.length() == 0 || stored_mdns.length() > 32) {
         stored_mdns = DEFAULT_MDNS_NAME;
     }
@@ -656,6 +660,37 @@ void saveConfig(String ssid, String pass, String mdnsName, String srv, int prt, 
     preferences.putString("wuser", wUser);
     preferences.putString("wpass", wPass);
     preferences.end();
+}
+
+// --- Start / Advertise Hostname via mDNS ---
+void startMDNS(bool inAPMode) {
+    if (inAPMode) {
+        WiFi.softAPsetHostname(stored_mdns.c_str());
+    } else {
+        WiFi.setHostname(stored_mdns.c_str());
+    }
+
+    MDNS.end();
+    mdnsStarted = false;
+
+    if (MDNS.begin(stored_mdns.c_str())) {
+        MDNS.addService("http", "tcp", 80);
+        if (!inAPMode) {
+            MDNS.addService("ws", "tcp", 81);
+        }
+        mdnsStarted = true;
+        if (inAPMode) {
+            logMessage(">> mDNS responder started in AP mode: http://" + stored_mdns + ".local");
+        } else {
+            logMessage(">> mDNS responder started: http://" + stored_mdns + ".local");
+        }
+    } else {
+        if (inAPMode) {
+            logMessage(">> Error setting up MDNS responder in AP mode!");
+        } else {
+            Serial.println(">> Error setting up MDNS responder!");
+        }
+    }
 }
 
 // --- Verbose Console Logger ---
@@ -737,10 +772,14 @@ void checkWiFiConnection() {
     if (!apModeActive) {
         if (WiFi.status() == WL_CONNECTED) {
             wifiDisconnectedStartTime = 0;
+            if (!mdnsStarted) {
+                startMDNS(false);
+            }
             if (sinric_enabled && !sinricInitialized) {
                 setupSinricPro();
             }
         } else {
+            mdnsStarted = false;
             if (wifiDisconnectedStartTime == 0) {
                 wifiDisconnectedStartTime = millis();
                 logMessage(">> WiFi lost. Starting 10-minute AP fallback timer...");
@@ -756,6 +795,7 @@ void checkWiFiConnection() {
                 lastWiFiCheckTime = currentMillis;
                 logMessage(">> WiFi Disconnected. Attempting reconnection...");
                 WiFi.disconnect();
+                WiFi.setHostname(stored_mdns.c_str());
                 WiFi.begin(stored_ssid.c_str(), stored_password.c_str());
             }
         }
@@ -885,6 +925,11 @@ void registerConfigAndActionRoutes(bool inAPMode) {
         String s_ssid = server.hasArg("wifi_ssid") ? server.arg("wifi_ssid") : DEFAULT_SSID;
         String s_pass = server.hasArg("wifi_pass") ? server.arg("wifi_pass") : DEFAULT_PASSWORD;
         String s_mdns = server.hasArg("mdns_name") && server.arg("mdns_name") != "" ? server.arg("mdns_name") : DEFAULT_MDNS_NAME;
+        s_mdns.trim();
+        s_mdns.toLowerCase();
+        if (s_mdns.length() == 0 || s_mdns.length() > 32) {
+            s_mdns = DEFAULT_MDNS_NAME;
+        }
         bool mEnabled = server.hasArg("mqtt_enabled");
         String srv = server.hasArg("mqtt_server") ? server.arg("mqtt_server") : DEFAULT_MQTT_SERVER;
         int prt = server.hasArg("mqtt_port") ? server.arg("mqtt_port").toInt() : DEFAULT_MQTT_PORT;
@@ -950,9 +995,7 @@ void enterAPMode() {
     }
 
     // Initialize mDNS in AP Mode too
-    if (MDNS.begin(stored_mdns.c_str())) {
-        logMessage(">> mDNS responder started in AP mode: http://" + stored_mdns + ".local");
-    }
+    startMDNS(true);
 
     webSocket.close();
     server.stop();
@@ -1129,6 +1172,7 @@ void setup() {
 
     loadConfig();
 
+    WiFi.setHostname(stored_mdns.c_str());
     WiFi.begin(stored_ssid.c_str(), stored_password.c_str());
     unsigned long startAttempt = millis();
     while (WiFi.status() != WL_CONNECTED) {
@@ -1140,11 +1184,7 @@ void setup() {
 
     // --- mDNS Start Initialization in Normal Mode ---
     if (WiFi.status() == WL_CONNECTED) {
-        if (MDNS.begin(stored_mdns.c_str())) {
-            Serial.println(">> mDNS responder started: http://" + stored_mdns + ".local");
-        } else {
-            Serial.println(">> Error setting up MDNS responder!");
-        }
+        startMDNS(false);
         setupSinricPro();
     }
     // ------------------------------------------------
