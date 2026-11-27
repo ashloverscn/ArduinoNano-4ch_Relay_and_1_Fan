@@ -48,12 +48,15 @@ const bool  DEFAULT_MQTT_ENABLED = true;
 const bool  DEFAULT_SINRIC_ENABLED = true;
 const char* DEFAULT_SINRIC_APP_KEY = "167aca6d-6a18-4130-87a0-4eb35903e60b";
 const char* DEFAULT_SINRIC_APP_SECRET = "fc5c8d46-ac77-4f95-86ea-a4720be13ab6-ed999d04-2a0b-4335-ba52-7112f10d2f4d";
-const char* DEFAULT_SINRIC_LIGHT1_ID = "6b01c63783456de8896de12d";
-const char* DEFAULT_SINRIC_LIGHT2_ID = "6b01c637814fdde8896de12d";
-const char* DEFAULT_SINRIC_LIGHT3_ID = "6b01c645764fdde8896de12d";
-const char* DEFAULT_SINRIC_LIGHT4_ID = "6b01c5f59ea140585cb89aab";
+const char* DEFAULT_SINRIC_LIGHT1_ID = "6b087b4b7tg4ce9fd668ec20";
+const char* DEFAULT_SINRIC_LIGHT2_ID = "6b087b4b7d04ce9fd668ec20";
+const char* DEFAULT_SINRIC_LIGHT3_ID = "6b087b4b7gy4ce9fd668ec20";
+const char* DEFAULT_SINRIC_LIGHT4_ID = "6b087b5a814fdde88978ef40";
 const char* DEFAULT_SINRIC_FAN_ID = "6b08870e7d04ce9fd669007d";
 const char* SINRIC_FAN_RANGE_INSTANCE = "rangeInstance1";
+const int   SINRIC_FAN_RANGE_MIN = 0;
+const int   SINRIC_FAN_RANGE_MAX = 9;
+const int   SINRIC_FAN_DEFAULT_STEP = 5;
 
 const char* DEFAULT_WEB_USER = "admin";
 const char* DEFAULT_WEB_PASS = "admin1234S";
@@ -108,8 +111,8 @@ bool factoryResetTriggered = false;
 bool apModeActive = false;
 bool sinricInitialized = false;
 bool mdnsStarted = false;
-int lastFanSpeed = 5;
-std::map<String, int> globalRangeValues;
+int lastFanSpeed = SINRIC_FAN_DEFAULT_STEP;
+std::map<String, int> globalRangeValues = {{SINRIC_FAN_RANGE_INSTANCE, SINRIC_FAN_DEFAULT_STEP}};
 CustomRangeFan* sinricFanDevice = nullptr;
 
 // Forward declarations
@@ -677,6 +680,13 @@ void saveConfig(String ssid, String pass, String mdnsName, String srv, int prt, 
     preferences.end();
 }
 
+void performFactoryResetNVS() {
+    preferences.begin("config", false);
+    preferences.clear();
+    preferences.end();
+    loadConfig();
+}
+
 // --- Start / Advertise Hostname via mDNS ---
 void startMDNS(bool inAPMode) {
     if (inAPMode) {
@@ -725,6 +735,8 @@ bool onSinricLightPowerState(const String &deviceId, bool &state) {
         if (sinric_light_ids[i].length() > 0 && deviceId == sinric_light_ids[i]) {
             String cmd = "POWER" + String(i + 1) + (state ? " ON" : " OFF");
             handleCommand(cmd);
+            SinricProSwitch &lightDev = SinricPro[sinric_light_ids[i]];
+            lightDev.sendPowerStateEvent(state);
             return true;
         }
     }
@@ -732,7 +744,7 @@ bool onSinricLightPowerState(const String &deviceId, bool &state) {
 }
 
 void applyFanStep(const String &deviceId, const String &instance, int rawValue) {
-    int fanStep = constrain(rawValue, 0, 9);
+    int fanStep = constrain(rawValue, SINRIC_FAN_RANGE_MIN, SINRIC_FAN_RANGE_MAX);
     globalRangeValues[instance] = fanStep;
     if (fanStep > 0) {
         lastFanSpeed = fanStep;
@@ -758,7 +770,8 @@ bool onSinricFanAdjustRangeValue(const String &deviceId, const String &instance,
     if (sinric_fan_id.length() == 0 || deviceId != sinric_fan_id) return false;
     if (instance != SINRIC_FAN_RANGE_INSTANCE) return false;
 
-    int nextVal = globalRangeValues[instance] + valueDelta;
+    int baseVal = globalRangeValues.count(instance) ? globalRangeValues[instance] : SINRIC_FAN_DEFAULT_STEP;
+    int nextVal = baseVal + valueDelta;
     applyFanStep(deviceId, instance, nextVal);
     valueDelta = globalRangeValues[instance];
     return true;
@@ -847,11 +860,7 @@ void checkButton() {
         if (heldTime >= VERY_LONG_PRESS_DURATION && !factoryResetTriggered) {
             factoryResetTriggered = true;
             logMessage(">> [FACTORY RESET] 10s Very Long Press detected! Erasing NVS storage & entering AP Mode...");
-
-            preferences.begin("config", false);
-            preferences.clear();
-            preferences.end();
-
+            performFactoryResetNVS();
             delay(500);
             enterAPMode();
         }
@@ -997,9 +1006,7 @@ void registerConfigAndActionRoutes(bool inAPMode) {
         if (requireAuth && !server.authenticate(stored_web_user.c_str(), stored_web_pass.c_str())) {
             return server.requestAuthentication();
         }
-        preferences.begin("config", false);
-        preferences.clear();
-        preferences.end();
+        performFactoryResetNVS();
         server.send(200, "text/html", "<h3>Factory Reset Complete! Entering AP Mode...</h3>");
         delay(1000);
         enterAPMode();
