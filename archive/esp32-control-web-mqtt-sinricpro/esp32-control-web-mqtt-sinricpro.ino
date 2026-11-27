@@ -8,9 +8,27 @@
 #include <Preferences.h>
 #include <Update.h>
 #include <ESPmDNS.h>
+#include <map>
 #include <SinricPro.h>
 #include <SinricProSwitch.h>
-#include <SinricProFanUS.h>
+#include <Capabilities/RangeController.h>
+
+// Single-file custom RangeController device (0-9) for SINRICPRO_5_1_0
+class CustomRangeFan : public SinricProDevice,
+                       public SINRICPRO_5_1_0::RangeController<CustomRangeFan> {
+  friend class SINRICPRO_5_1_0::RangeController<CustomRangeFan>;
+public:
+  CustomRangeFan(const String &deviceId) : SinricProDevice(deviceId, "CustomRangeFan") {}
+};
+
+// Helper to invoke protected SinricProClass::add<T>() from a single .ino file
+class SinricProHelper : public SINRICPRO_5_1_0::SinricProClass {
+public:
+  template <typename DeviceType>
+  DeviceType& registerDevice(const String &deviceId) {
+    return add<DeviceType>(deviceId);
+  }
+};
 
 Preferences preferences;
 
@@ -34,7 +52,8 @@ const char* DEFAULT_SINRIC_LIGHT1_ID = "6b01c63783456de8896de12d";
 const char* DEFAULT_SINRIC_LIGHT2_ID = "6b01c637814fdde8896de12d";
 const char* DEFAULT_SINRIC_LIGHT3_ID = "6b01c645764fdde8896de12d";
 const char* DEFAULT_SINRIC_LIGHT4_ID = "6b01c5f59ea140585cb89aab";
-const char* DEFAULT_SINRIC_FAN_ID = "6b01ca876d3b5ef5cdc6810f";
+const char* DEFAULT_SINRIC_FAN_ID = "6b08870e7d04ce9fd669007d";
+const char* SINRIC_FAN_RANGE_INSTANCE = "rangeInstance1";
 
 const char* DEFAULT_WEB_USER = "admin";
 const char* DEFAULT_WEB_PASS = "admin1234S";
@@ -74,8 +93,8 @@ const unsigned long SERIAL_TIMEOUT = 50;
 
 // --- Wi-Fi Reconnection & AP Fallback State ---
 unsigned long lastWiFiCheckTime = 0;
-const unsigned long WIFI_RETRY_INTERVAL = 10000; 
-unsigned long wifiDisconnectedStartTime = 0;        
+const unsigned long WIFI_RETRY_INTERVAL = 10000;
+unsigned long wifiDisconnectedStartTime = 0;
 const unsigned long WIFI_AP_FALLBACK_TIMEOUT = 600000; // 10 minutes
 
 // --- GPIO 0 Button Press States (3s AP Mode & 10s Factory Reset) ---
@@ -89,7 +108,9 @@ bool factoryResetTriggered = false;
 bool apModeActive = false;
 bool sinricInitialized = false;
 bool mdnsStarted = false;
-int lastFanSpeed = 0;
+int lastFanSpeed = 5;
+std::map<String, int> globalRangeValues;
+CustomRangeFan* sinricFanDevice = nullptr;
 
 // Forward declarations
 void loadConfig();
@@ -174,7 +195,7 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
             transition: 0.2s;
         }
         button:hover { background-color: #0056b3; }
-        
+
         .relay-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
         .relay-btn {
             height: 70px;
@@ -213,13 +234,11 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
     <a href="/config" class="config-link">⚙️ Config</a>
     <h2>Home Automation Controller</h2>
 
-    <!-- Connection Status Banner -->
     <div class="card">
         <div class="card-title">ESP32 Gateway Status</div>
         <div id="connectionStatus" class="status-disconnected">Status: Connecting...</div>
     </div>
 
-    <!-- Relays Control -->
     <div class="card">
         <div class="card-title">Relay Controls</div>
         <div class="relay-grid">
@@ -230,7 +249,6 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
         </div>
     </div>
 
-    <!-- Dimmer Control -->
     <div class="card">
         <div class="card-title">Dimmer Control (0-9)</div>
         <div class="row">
@@ -242,7 +260,6 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
         </div>
     </div>
 
-    <!-- Global & Utilities -->
     <div class="card">
         <div class="card-title">Global Commands & Status</div>
         <div class="row">
@@ -252,7 +269,6 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
         </div>
     </div>
 
-    <!-- Console Log -->
     <div class="card">
         <div class="card-title">Serial Console / Feedback</div>
         <div id="console"></div>
@@ -266,13 +282,12 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
 
     function initWebSocket() {
         ws = new WebSocket('ws://' + window.location.hostname + ':81/');
-        
+
         ws.onopen = function(event) {
             reconnectAttempts = 0;
             updateConnectionBanner(true);
             appendConsole("Connected. Authenticating WebSocket...");
-            
-            // Send automatic credentials handshake
+
             ws.send(JSON.stringify({
                 auth: {
                     user: "{{WEB_USER}}",
@@ -280,7 +295,7 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
                 }
             }));
         };
-        
+
         ws.onclose = function(event) {
             updateConnectionBanner(false);
             let timeout = Math.min(1000 * Math.pow(1.5, reconnectAttempts), 10000);
@@ -288,7 +303,7 @@ const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
             setTimeout(initWebSocket, timeout);
             reconnectAttempts++;
         };
-        
+
         ws.onmessage = function(event) {
             try {
                 const data = JSON.parse(event.data);
@@ -473,12 +488,12 @@ const char CONFIG_PAGE[] PROGMEM = R"rawliteral(
 <div class="container">
     <a href="/" class="back-link">&larr; Back to Dashboard</a>
     <h2>Device Configuration</h2>
-    
+
     <form action="/save-settings" method="POST">
         <h3>Wi-Fi & Network Settings</h3>
         <label>Wi-Fi SSID:</label>
         <input type="text" name="wifi_ssid" id="cfg_ssid">
-        
+
         <label>Wi-Fi Password:</label>
         <input type="password" name="wifi_pass" id="cfg_pass_wifi">
 
@@ -486,7 +501,7 @@ const char CONFIG_PAGE[] PROGMEM = R"rawliteral(
         <input type="text" name="mdns_name" id="cfg_mdns">
 
         <hr>
-        
+
         <div class="section-header-row">
             <h3>MQTT Settings</h3>
             <label class="checkbox-container">
@@ -496,19 +511,19 @@ const char CONFIG_PAGE[] PROGMEM = R"rawliteral(
 
         <label>MQTT Server:</label>
         <input type="text" name="mqtt_server" id="cfg_server">
-        
+
         <label>MQTT Port:</label>
         <input type="number" name="mqtt_port" id="cfg_port">
-        
+
         <label>MQTT Username:</label>
         <input type="text" name="mqtt_user" id="cfg_user">
-        
+
         <label>MQTT Password:</label>
         <input type="password" name="mqtt_pass" id="cfg_pass">
-        
+
         <label>Command Topic:</label>
         <input type="text" name="mqtt_topic_cmd" id="cfg_tcmd">
-        
+
         <label>State Topic:</label>
         <input type="text" name="mqtt_topic_state" id="cfg_tstate">
 
@@ -549,7 +564,7 @@ const char CONFIG_PAGE[] PROGMEM = R"rawliteral(
 
         <label>Web Password:</label>
         <input type="password" name="web_pass" id="cfg_wpass">
-        
+
         <button type="submit">Save & Reboot</button>
     </form>
 
@@ -716,22 +731,36 @@ bool onSinricLightPowerState(const String &deviceId, bool &state) {
     return false;
 }
 
-bool onSinricFanPowerState(const String &deviceId, bool &state) {
-    if (sinric_fan_id.length() == 0 || deviceId != sinric_fan_id) return false;
-    if (!state) {
-        handleCommand("DIMMER:0");
-    } else {
-        int targetSpeed = (lastFanSpeed > 0) ? lastFanSpeed : 5;
-        handleCommand("DIMMER:" + String(targetSpeed));
+void applyFanStep(const String &deviceId, const String &instance, int rawValue) {
+    int fanStep = constrain(rawValue, 0, 9);
+    globalRangeValues[instance] = fanStep;
+    if (fanStep > 0) {
+        lastFanSpeed = fanStep;
     }
+    logMessage("[Device: " + deviceId + "]: Value for \"" + instance + "\" set to " + String(fanStep));
+    handleCommand("DIMMER:" + String(fanStep));
+
+    if (sinricFanDevice != nullptr) {
+        sinricFanDevice->sendRangeValueEvent(instance, fanStep);
+    }
+}
+
+bool onSinricFanRangeValue(const String &deviceId, const String &instance, int &rangeValue) {
+    if (sinric_fan_id.length() == 0 || deviceId != sinric_fan_id) return false;
+    if (instance != SINRIC_FAN_RANGE_INSTANCE) return false;
+
+    applyFanStep(deviceId, instance, rangeValue);
+    rangeValue = globalRangeValues[instance];
     return true;
 }
 
-bool onSinricFanRangeValue(const String &deviceId, int &rangeValue) {
+bool onSinricFanAdjustRangeValue(const String &deviceId, const String &instance, int &valueDelta) {
     if (sinric_fan_id.length() == 0 || deviceId != sinric_fan_id) return false;
-    int mappedSpeed = constrain(rangeValue - 1, 0, 9);
-    lastFanSpeed = mappedSpeed;
-    handleCommand("DIMMER:" + String(mappedSpeed));
+    if (instance != SINRIC_FAN_RANGE_INSTANCE) return false;
+
+    int nextVal = globalRangeValues[instance] + valueDelta;
+    applyFanStep(deviceId, instance, nextVal);
+    valueDelta = globalRangeValues[instance];
     return true;
 }
 
@@ -750,9 +779,9 @@ void setupSinricPro() {
     }
 
     if (sinric_fan_id.length() > 0) {
-        SinricProFanUS &fanDev = SinricPro[sinric_fan_id];
-        fanDev.onPowerState(onSinricFanPowerState);
-        fanDev.onRangeValue(onSinricFanRangeValue);
+        sinricFanDevice = &reinterpret_cast<SinricProHelper&>(SinricPro).registerDevice<CustomRangeFan>(sinric_fan_id);
+        sinricFanDevice->onRangeValue(SINRIC_FAN_RANGE_INSTANCE, onSinricFanRangeValue);
+        sinricFanDevice->onAdjustRangeValue(SINRIC_FAN_RANGE_INSTANCE, onSinricFanAdjustRangeValue);
     }
 
     SinricPro.onConnected([]() {
@@ -783,7 +812,7 @@ void checkWiFiConnection() {
             if (wifiDisconnectedStartTime == 0) {
                 wifiDisconnectedStartTime = millis();
                 logMessage(">> WiFi lost. Starting 10-minute AP fallback timer...");
-            } 
+            }
             else if (millis() - wifiDisconnectedStartTime >= WIFI_AP_FALLBACK_TIMEOUT) {
                 logMessage(">> WiFi reconnection timed out (10 mins exceeded). Entering AP Mode automatically...");
                 enterAPMode();
@@ -805,35 +834,33 @@ void checkWiFiConnection() {
 // --- GPIO 0 Button Handler (3s AP Mode & 10s Factory Reset) ---
 void checkButton() {
     int currentState = digitalRead(CONFIG_BUTTON_PIN);
-    
+
     if (currentState == LOW && buttonStateLast == HIGH) {
         buttonPressStartTime = millis();
         buttonStateLast = LOW;
         apTriggered = false;
         factoryResetTriggered = false;
-    } 
+    }
     else if (currentState == LOW && buttonStateLast == LOW) {
         unsigned long heldTime = millis() - buttonPressStartTime;
-        
-        // 10-Second Very Long Press: Erase NVS & Boot into AP Mode
+
         if (heldTime >= VERY_LONG_PRESS_DURATION && !factoryResetTriggered) {
             factoryResetTriggered = true;
             logMessage(">> [FACTORY RESET] 10s Very Long Press detected! Erasing NVS storage & entering AP Mode...");
-            
+
             preferences.begin("config", false);
             preferences.clear();
             preferences.end();
-            
+
             delay(500);
             enterAPMode();
         }
-        // 3-Second Long Press: Enter AP Configuration Mode
         else if (heldTime >= LONG_PRESS_DURATION && heldTime < VERY_LONG_PRESS_DURATION && !apTriggered && !apModeActive) {
             apTriggered = true;
             logMessage(">> 3s Long Press detected! Entering AP Configuration Mode...");
             enterAPMode();
         }
-    } 
+    }
     else if (currentState == HIGH && buttonStateLast == LOW) {
         buttonStateLast = HIGH;
     }
@@ -860,7 +887,7 @@ void setupOTARoutes(bool requireAuth) {
         HTTPUpload& upload = server.upload();
         if (upload.status == UPLOAD_FILE_START) {
             Serial.printf(">> [OTA] Update Start: %s\n", upload.filename.c_str());
-            if (!Update.begin(UPDATE_SIZE_UNKNOWN)) { 
+            if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
                 Update.printError(Serial);
             }
         } else if (upload.status == UPLOAD_FILE_WRITE) {
@@ -868,7 +895,7 @@ void setupOTARoutes(bool requireAuth) {
                 Update.printError(Serial);
             }
         } else if (upload.status == UPLOAD_FILE_END) {
-            if (Update.end(true)) { 
+            if (Update.end(true)) {
                 Serial.printf(">> [OTA] Update Success: %u bytes\nRebooting...\n", upload.totalSize);
             } else {
                 Update.printError(Serial);
@@ -984,7 +1011,7 @@ void enterAPMode() {
     apModeActive = true;
     WiFi.disconnect();
     WiFi.mode(WIFI_AP);
-    
+
     bool apStarted = WiFi.softAP("ESP32-Setup-AP", "12345678");
     if (apStarted) {
         logMessage(">> AP Mode Started Successfully!");
@@ -994,7 +1021,6 @@ void enterAPMode() {
         logMessage(">> Failed to start AP Mode!");
     }
 
-    // Initialize mDNS in AP Mode too
     startMDNS(true);
 
     webSocket.close();
@@ -1023,7 +1049,6 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
             DeserializationError error = deserializeJson(doc, payload, length);
             if (error) break;
 
-            // 1. Handle Authentication Packet
             if (doc.containsKey("auth")) {
                 JsonObject auth = doc["auth"];
                 String u = auth["user"] | "";
@@ -1036,7 +1061,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
                     String out;
                     serializeJson(resp, out);
                     webSocket.sendTXT(num, out);
-                    
+
                     Serial.println("STATUS");
                 } else {
                     JsonDocument resp;
@@ -1049,7 +1074,6 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
                 break;
             }
 
-            // 2. Reject commands if client is not authenticated
             if (num < 10 && !wsAuthenticated[num]) {
                 JsonDocument resp;
                 resp["type"] = "console_log";
@@ -1060,7 +1084,6 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
                 break;
             }
 
-            // 3. Process normal commands if authenticated
             if (doc.containsKey("command")) {
                 String cmd = doc["command"].as<String>();
                 handleCommand(cmd);
@@ -1079,7 +1102,7 @@ void callbackMQTT(char* topic, byte* payload, unsigned int length) {
         message += (char)payload[i];
     }
     message.trim();
-    
+
     logMessage(">> [MQTT Received on " + String(topic) + "]: " + message);
 
     if (String(topic) == mqtt_topic_cmd) {
@@ -1099,15 +1122,15 @@ void reconnectMQTT() {
     if (mqtt_enabled && !apModeActive && !mqttClient.connected() && WiFi.status() == WL_CONNECTED) {
         static unsigned long lastMqttRetry = 0;
         const unsigned long MQTT_RETRY_INTERVAL = 300000; // 5 minutes in milliseconds
-        
-        if (millis() - lastMqttRetry >= MQTT_RETRY_INTERVAL || lastMqttRetry == 0) { 
+
+        if (millis() - lastMqttRetry >= MQTT_RETRY_INTERVAL || lastMqttRetry == 0) {
             lastMqttRetry = millis();
             logMessage(">> Attempting MQTT connection...");
             String clientId = "ESP32Gateway-" + String((uint32_t)ESP.getEfuseMac(), HEX);
             if (mqttClient.connect(clientId.c_str(), mqtt_user.c_str(), mqtt_pass.c_str())) {
                 logMessage(">> MQTT Connected!");
                 mqttClient.subscribe(mqtt_topic_cmd.c_str());
-                lastMqttRetry = 0; 
+                lastMqttRetry = 0;
             } else {
                 logMessage(">> MQTT Connection failed, rc=" + String(mqttClient.state()) + ". Retrying in 5 minutes...");
             }
@@ -1124,7 +1147,7 @@ void handleCommand(const String& cmd) {
     cmdDoc["command"] = trimmedCmd;
     String pubPayload;
     serializeJson(cmdDoc, pubPayload);
-    
+
     if (mqtt_enabled && mqttClient.connected()) {
         mqttClient.publish(mqtt_topic_cmd.c_str(), pubPayload.c_str());
     }
@@ -1182,12 +1205,10 @@ void setup() {
         }
     }
 
-    // --- mDNS Start Initialization in Normal Mode ---
     if (WiFi.status() == WL_CONNECTED) {
         startMDNS(false);
         setupSinricPro();
     }
-    // ------------------------------------------------
 
     if (mqtt_enabled) {
         espClient.setInsecure();
@@ -1245,7 +1266,7 @@ void loop() {
         if (serialBuffer.length() < 512) {
             serialBuffer += c;
         } else {
-            serialBuffer = ""; 
+            serialBuffer = "";
         }
     }
 
